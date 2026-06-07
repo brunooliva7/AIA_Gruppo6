@@ -105,7 +105,11 @@ def main():
     
 
     # Apri la webcam (0 è la webcam predefinita)
+<<<<<<< HEAD
     cap = cv2.VideoCapture(1)
+=======
+    cap = cv2.VideoCapture(0)
+>>>>>>> 9719787d1fe38513d3c13d3180a5973580f616ba
 
     if not cap.isOpened():
         print("Errore: Impossibile accedere alla webcam.")
