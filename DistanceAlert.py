@@ -7,10 +7,10 @@ import os
 # 1. PARAMETRI DI CALIBRAZIONE
 # Questo valore dipende dalla tua webcam. 
 # Se la distanza calcolata è sbagliata, aumenta o diminuisci questo numero.
-FOCAL_LENGTH = 543
+FOCAL_LENGTH = 300
 
 # Distanza limite per far scattare l'allarme (in centimetri)
-DISTANZA_ALLARME = 300 
+DISTANZA_ALLARME = 150 
 
 # 2. DIZIONARIO ALTEZZE REALI (in centimetri)
 # YOLO riconosce 80 oggetti. Qui inseriamo le altezze medie di alcuni.
@@ -105,7 +105,7 @@ def main():
     
 
     # Apri la webcam (0 è la webcam predefinita)
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(1)
 
     if not cap.isOpened():
         print("Errore: Impossibile accedere alla webcam.")

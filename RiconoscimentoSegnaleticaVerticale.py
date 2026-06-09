@@ -90,6 +90,7 @@ def elabora_linee_guida(frame, blu_lower, blu_upper):
     Isola le linee guida blu, calcola i momenti per determinare il centro,
     disegna gli indicatori visivi e stampa i comandi per i motori.
     """
+    frame_linea_persa = 0
     altezza, larghezza, _ = frame.shape
     centro_camera = larghezza // 2
     incrocio_rilevato = False
