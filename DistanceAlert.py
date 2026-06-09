@@ -5,8 +5,11 @@ from cvlib.object_detection import YOLO
 
 # ---------------------------------------------------------
 # 1. PARAMETRI DI CALIBRAZIONE
-# ---------------------------------------------------------
+# Questo valore dipende dalla tua webcam. 
+# Se la distanza calcolata è sbagliata, aumenta o diminuisci questo numero.
 FOCAL_LENGTH = 543
+
+# Distanza limite per far scattare l'allarme (in centimetri)
 DISTANZA_ALLARME = 300 
 
 ALTEZZE_REALI_CM = {
@@ -49,9 +52,10 @@ def main():
     except Exception as e:
         print(f"Errore: Impossibile trovare i file in {cartella_yolo}.")
         return
+    
 
-    print("Accensione fotocamera in corso...")
-    cap = cv2.VideoCapture(0) # Avvio standard e sicuro
+    # Apri la webcam (0 è la webcam predefinita)
+    cap = cv2.VideoCapture(0)
 
     if not cap.isOpened():
         print("❌ Errore critico: Impossibile accedere alla webcam.")
