@@ -102,6 +102,8 @@ def elabora_linee_guida(frame, blu_lower, blu_upper):
     mask = cv2.inRange(hsv, blu_lower, blu_upper)
     
     # Calcolo dei momenti dell'immagine per trovare il centro della maschera
+    # L'area (m00) ci dà un'indicazione di quanto è grande la regione blu rilevata. 
+    # Se è troppo grande, potrebbe indicare un incrocio con molte linee blu.
     moments = cv2.moments(mask)
     area_linea_guida = moments["m00"]
 
@@ -156,7 +158,7 @@ def gestisci_macchina_a_stati(errore_x, incrocio_rilevato):
     # ----------------------------------------------------
     if stato_attuale == STATO_NAVIGAZIONE:
         if incrocio_rilevato:
-            print("[STATO] Incrocio rilevato! Cambio stato: ATTESA SCELTA.")
+            print("[STATO] Incrocio rilevato! Cambio stato: STATO_INCROCIO_ATTESA.")
             stato_attuale = STATO_INCROCIO_ATTESA
             print("Comando motori: STOP")  # Ferma Pepper all'incrocio
         else:
@@ -228,7 +230,7 @@ def main():
     global stato_attuale, direzione_da_prendere, tempo_inizio_svolta
     
     # Inizializzazione sorgente video
-    video = cv2.VideoCapture(1)
+    video = cv2.VideoCapture(0)
     
     # Definizione range colore HSV per la linea blu
     BLU_LOWER = np.array([100, 150, 50])
