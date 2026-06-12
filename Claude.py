@@ -1,5 +1,4 @@
 import os
-
 import cv2
 import numpy as np
 import threading
@@ -8,7 +7,6 @@ import easyocr
 import queue
 import speech_recognition as sr
 from cvlib.object_detection import YOLO
-import speech_recognition as sr
 import winsound  # Riconoscimento audio e feedback acustici di sistema
 
 
@@ -193,121 +191,56 @@ def invia_alert(etichetta, distanza):
 coda_voce_unica = queue.Queue()
 
 # 2. Unico Thread per la gestione del Text-To-Speech
-# ======================================================
-# THREAD VOCE (OUTPUT): SINTESI VOCALE PC -> UTENTE
-# ======================================================
-
-# ======================================================
-# 4. THREAD VOCE (OUTPUT): SINTESI VOCALE PC -> UTENTE
-# ======================================================
-
 def thread_bocca_tts_unico():
-    print("[THREAD VOCE] Inizializzazione in corso...")
-    try:
-        import pythoncom
-        pythoncom.CoInitialize() # Sblocca l'accesso alle risorse di sistema per i thread secondari
-    except ImportError:
-        pass
+    import pythoncom
+    import win32com.client
+    pythoncom.CoInitialize()  # Obbligatorio per usare COM in un thread secondario
 
-    import pyttsx3
-    motore_voce = pyttsx3.init()
-    motore_voce.setProperty('rate', 170)
-    print("[THREAD VOCE] Pronto e in ascolto della coda.")
+    voce = win32com.client.Dispatch("SAPI.SpVoice")
+    voce.Rate = 1  # Velocità: da -10 (lento) a +10 (veloce). 1 = leggermente sopra il normale
 
+    print("[THREAD VOCE UNIFICATO] Pronto.")
     while dati_condivisi["running"]:
         try:
-            # Aspetta un testo dalla coda
-            testo = coda_testo_da_leggere.get(timeout=0.5)
-            
-            # Diventa rosso per sicurezza: sto parlando
-            semaforo_voce.clear() 
-            
-            print(f"\n>>> [ROBOT PARLA]: {testo} <<<\n")
-            motore_voce.say(testo)
-            motore_voce.runAndWait() # Ora non si bloccherà più
-            
-            # Se non ci sono altri messaggi accumulati, dà il via libera al microfono
-            if coda_testo_da_leggere.empty():
-                semaforo_voce.set() # Verde
-                
-            coda_testo_da_leggere.task_done()
+            testo = coda_voce_unica.get(timeout=0.5)
+
+            semaforo_voce.clear()  # Rosso: il robot sta parlando, l'orecchio aspetta
+            print(f"\n>>> [SISTEMA PARLA]: {testo} <<<\n")
+
+            voce.Speak(testo)      # Sincrono per default: blocca finché non ha finito
+
+            semaforo_voce.set()    # Verde: il robot ha finito, l'orecchio può ascoltare
+            coda_voce_unica.task_done()
         except queue.Empty:
             continue
         except Exception as e:
-            print(f"[ERRORE BOCCA]: {e}")
+            print(f"[ERRORE AUDIO] {e}")
+            semaforo_voce.set()    # In caso di errore, sblocca comunque il semaforo
 
-
+# 3. Aggiorna la funzione invia_voce per usare la nuova coda
 def invia_voce(testo, prioritario=False):
     global ultimo_messaggio_navigazione, ultimo_tempo_voce
     tempo_attuale = time.time()
 
     if prioritario:
-        # Se è un comando vocale (es: "Sono in ascolto"), svuota i vecchi messaggi visivi rimasti in coda
-        while not coda_testo_da_leggere.empty():
+        semaforo_voce.clear()  # ← Solo qui, quando siamo CERTI di parlare
+        while not coda_voce_unica.empty():
             try:
-                coda_testo_da_leggere.get_nowait()
-                coda_testo_da_leggere.task_done()
+                coda_voce_unica.get_nowait()
+                coda_voce_unica.task_done()
             except queue.Empty:
                 break
-        
-        semaforo_voce.clear() # Mette subito il semaforo su ROSSO
-        coda_testo_da_leggere.put(testo)
+        coda_voce_unica.put(testo)
         ultimo_messaggio_navigazione = ''
         ultimo_tempo_voce = 0
-    else:
-        # CORREZIONE CRITICA: Deve essere 'and', non 'or'! 
-        # Non inviare nulla se non sono passati almeno INTERVALLO_VOCE secondi dall'ultima frase detta
-        if testo != ultimo_messaggio_navigazione and (tempo_attuale - ultimo_tempo_voce) > INTERVALLO_VOCE:
-            coda_testo_da_leggere.put(testo)
-            ultimo_messaggio_navigazione = testo
-            ultimo_tempo_voce = tempo_attuale
 
-'''
-def thread_notifiche_vocali():
-    import pyttsx3
-    print("[THREAD OUTPUT VOCALE] Pronto.")
-    while dati_condivisi["running"]:
-        try:
-            # Preleva il messaggio dalla coda
-            messaggio = coda_voce.get(timeout=0.5)
-            print(f"\n>>> [GUIDA VOCALE]: {messaggio} <<<\n")
-            
-            # SOLUZIONE: Crea l'engine QUI, fresco per questo specifico messaggio
-            engine = pyttsx3.init()
-            engine.say(messaggio)
-            engine.runAndWait()
-            
-            # Forza la pulizia dell'istanza per liberare il motore del OS
-            del engine 
-            
-            coda_voce.task_done()
-        except queue.Empty:
-            continue
-        except Exception as e:
-            print(f"[ERRORE VOCALE] {e}")
-
-def invia_voce(testo, prioritario=False):
-    global ultimo_messaggio_navigazione, ultimo_tempo_voce
-    tempo_attuale = time.time()
-
-    if prioritario:
-        # Svuota la coda da messaggi residui
-        while not coda_voce.empty():
-            try:
-                coda_voce.get_nowait()
-                coda_voce.task_done()
-            except queue.Empty:
-                break
-        coda_voce.put(testo)
-        ultimo_messaggio_navigazione = ''  # Resetta il messaggio di navigazione per evitare blocchi
-        ultimo_tempo_voce = 0   # ← AGGIUNTO: resetta anche il timer
     else:
         if testo != ultimo_messaggio_navigazione or (tempo_attuale - ultimo_tempo_voce) > INTERVALLO_VOCE:
-            # NON mettere in coda se c'è già un messaggio in attesa
-            coda_voce.put(testo)
+            semaforo_voce.clear()  # ← Solo se il messaggio viene davvero messo in coda
+            coda_voce_unica.put(testo)
             ultimo_messaggio_navigazione = testo
             ultimo_tempo_voce = tempo_attuale
-'''
+        # Se scartato, non toccare il semaforo → rimane verde, l'orecchio continua ad ascoltare
 
 
 # ================================
@@ -319,26 +252,8 @@ def esegui_bip_chiusura():
     """Emette un doppio tono discendente per indicare che il microfono è chiuso."""
     winsound.Beep(600, 150)
     winsound.Beep(450, 150)
-    print("🔒 [SESSIONE CHIUSA] Microfono disattivato. Ritorno in background.\n")
+    print("[SESSIONE CHIUSA] Microfono disattivato. Ritorno in background.\n")
 
-
-# --- 1. IL THREAD DELLA BOCCA (Output Vocale Asincrono) ---
-'''
-def thread_bocca_tts():
-    import pyttsx3
-    motore_voce = pyttsx3.init()
-    motore_voce.setProperty('rate', 170)
-    
-    while True:
-        testo = coda_testo_da_leggere.get() # Aspetta finché non c'è qualcosa da leggere
-        
-        semaforo_voce.clear()           # Mette il semaforo ROSSO (Sto iniziando a parlare!)
-        
-        print(f"Sistema: {testo}")
-        motore_voce.say(testo)
-        motore_voce.runAndWait()        # Questo blocca solo la Bocca, non blocca più l'Orecchio!
-        semaforo_voce.set()             # Mette il semaforo VERDE (Ho finito di parlare!)
-'''
 
 # --- 2. IL THREAD DI ASCOLTO (Con Adattamento Ambientale Continuo) ---
 def thread_ascolto_google():
@@ -374,6 +289,7 @@ def thread_ascolto_google():
                 # CORREZIONE QUI:
                 invia_voce("Sono in ascolto.", prioritario=True)
                 
+                time.sleep(0.1) 
                 semaforo_voce.wait() 
                 
                 winsound.Beep(800, 200)
@@ -409,69 +325,6 @@ def thread_ascolto_google():
 # ==========================================
 # 6. FUNZIONE ELABORAZIONE LINEE GUIDA BLU
 # ==========================================
-'''
-def elabora_linee_guida(frame, blu_lower, blu_upper):
-
-    """
-    Isola le linee guida blu, calcola i momenti per determinare il centro,
-    disegna gli indicatori visivi e stampa i comandi per i motori.
-    """
-
-    altezza, larghezza, _ = frame.shape
-    centro_camera = larghezza // 2
-    incrocio_rilevato = False
-    errore_x = 0
-    
-    # Pre-processing del frame per eliminare rumore
-    blur = cv2.GaussianBlur(frame, (5, 5), 0)
-    hsv = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
-
-    # 2. GESTIONE LUCE ARTIFICIALE - SEPARAZIONE DEI CANALI ED APPLICAZIONE DI CLAHE SUL CANALE V (LUMINOSITÀ)
-    h, s, v = cv2.split(hsv)
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    v_normalizzato = clahe.apply(v)
-    
-    # Ricombiniamo i canali con la luminosità stabilizzata
-    hsv_stabilizzato = cv2.merge([h, s, v_normalizzato])
-
-
-    mask = cv2.inRange(hsv, blu_lower, blu_upper)
-
-
-    
-    # Calcolo dei momenti dell'immagine per trovare il centro della maschera
-    # L'area (m00) ci dà un'indicazione di quanto è grande la regione blu rilevata. 
-    # Se è troppo grande, potrebbe indicare un incrocio con molte linee blu.
-    moments = cv2.moments(mask)
-    area_linea_guida = moments["m00"]
-
-    if area_linea_guida > SOGLIA_MINIMA_PIXEL:
-        dati_condivisi["frame_linea_persa"] = 0
-        centro_linea_guida_x = int(moments["m10"] / moments["m00"])
-        centro_linea_guida_y = int(moments["m01"] / moments["m00"])
-        errore_x = centro_linea_guida_x - centro_camera
-
-        # --- LOGICA DI RILEVAMENTO INCROCIO PER LINEE INTERROTTE ---
-        # Se la linea si interrompe davanti o il suo baricentro cade molto in basso,
-        # significa che siamo arrivati alla sosta dell'incrocio visibile in foto.
-        if centro_linea_guida_y > SOGLIA_Y_INCROCIO:
-            incrocio_rilevato = True
-            print("[RILEVAMENTO] Incrocio rilevato: la linea guida si avvicina molto o si interrompe.")
-
-        # Disegno indicatori grafici
-        cv2.circle(frame, (centro_linea_guida_x, centro_linea_guida_y), 10, (0, 0, 255), -1)
-        cv2.line(frame, (centro_camera, altezza // 2), (centro_linea_guida_x, centro_linea_guida_y), (0, 255, 0), 2)
-    else: 
-        # Se la linea sparisce del tutto proprio mentre avanziamo verso l'apertura, l'abbiamo persa entrando nell'incrocio
-        errore_x = None  
-        dati_condivisi["frame_linea_persa"] += 1
-        if dati_condivisi["frame_linea_persa"] > SOGLIA_ALLARME_LINEA_PERSA:
-            incrocio_rilevato = True
-        else: 
-            incrocio_rilevato = False
-        
-    return frame, mask, incrocio_rilevato, errore_x
-'''
 def elabora_linee_guida(frame, blu_lower, blu_upper):
     global contatore_linea_persa, ultima_x_valida
     altezza, larghezza, _ = frame.shape
@@ -675,11 +528,9 @@ def main():
     # Inizializza la webcam del computer/telecamera esterna (ID 0 o 1)
     video = cv2.VideoCapture(1)
     
-    # AVVIO DI TUTTI E 5 I THREAD DI BACKGROUND
+    # AVVIO DI TUTTI E 4 I THREAD DI BACKGROUND
     threading.Thread(target=thread_yolo,args=(yolo_model,) , daemon=True).start()
     threading.Thread(target=thread_elaborazione_ocr,args=(lettore_ocr,) , daemon=True).start()
-    #threading.Thread(target=thread_notifiche_vocali, daemon=True).start()
-    #threading.Thread(target=thread_bocca_tts, daemon=True).start()
     threading.Thread(target=thread_bocca_tts_unico, daemon=True).start()
     threading.Thread(target=thread_ascolto_google, daemon=True).start()
     
@@ -750,7 +601,6 @@ def main():
         
         # FASE 2: ANALISI ISOLAMENTO LINEE GUIDA BLU
         frame_linee, maschera_linee, incrocio_rilevato, errore_x = elabora_linee_guida(frame.copy(), BLU_LOWER, BLU_UPPER)
-
         
         
         # FASE 3: MACCHINA A STATI (Genera i comandi vocali in coda)
