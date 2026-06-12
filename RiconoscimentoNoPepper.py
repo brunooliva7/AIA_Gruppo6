@@ -214,6 +214,7 @@ def invia_voce(testo, prioritario=False):
 # ==========================================
 # 6. FUNZIONE ELABORAZIONE LINEE GUIDA BLU
 # ==========================================
+'''
 def elabora_linee_guida(frame, blu_lower, blu_upper):
 
     """
@@ -275,7 +276,58 @@ def elabora_linee_guida(frame, blu_lower, blu_upper):
             incrocio_rilevato = False
         
     return frame, mask, incrocio_rilevato, errore_x
-
+'''
+def elabora_linee_guida(frame, blu_lower, blu_upper):
+    altezza, larghezza, _ = frame.shape
+    centro_camera = larghezza // 2
+    incrocio_rilevato = False
+    errore_x = 0
+    
+    # Segmentazione colore HSV e pulizia
+    blur = cv2.GaussianBlur(frame, (5, 5), 0)
+    hsv = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, blu_lower, blu_upper)
+    kernel = np.ones((5, 5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    
+    # TROVA TUTTI I CONTORNI (i blocchi bianchi separati)
+    contorni, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    contorni_validi = []
+    for c in contorni:
+        # Filtriamo i contorni troppo piccoli (rumore o riflessi sulle piastrelle)
+        if cv2.contourArea(c) > 1500: 
+            contorni_validi.append(c)
+            
+    # LOGICA DI DIRAMAZIONE:
+    # Se ci sono 2 o più linee separate visibili contemporaneamente, è un incrocio!
+    if len(contorni_validi) >= 2:
+        incrocio_rilevato = True
+        
+    # Calcoliamo il centraggio sul contorno più grande (la linea principale)
+    if len(contorni_validi) > 0:
+        # Trova il contorno più grande
+        contorno_maggiore = max(contorni_validi, key=cv2.contourArea)
+        moments = cv2.moments(contorno_maggiore)
+        
+        if moments["m00"] > 0:
+            centro_linea_guida_x = int(moments["m10"] / moments["m00"])
+            centro_linea_guida_y = int(moments["m01"] / moments["m00"])
+            errore_x = centro_linea_guida_x - centro_camera
+            
+            # Disegnamo i contorni per controllo visivo (Verdi per tracciamento)
+            cv2.drawContours(frame, contorni_validi, -1, (0, 255, 0), 2)
+            cv2.circle(frame, (centro_linea_guida_x, centro_linea_guida_y), 10, (0, 0, 255), -1)
+    else:
+        errore_x = None
+        # Se non vede nessuna linea, potrebbe essere finito nel vuoto centrale dell'incrocio
+        incrocio_rilevato = True 
+        
+    # Scriviamo sullo schermo quante linee vede
+    cv2.putText(frame, f"Linee rilevate: {len(contorni_validi)}", (10, altezza - 20), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+                
+    return frame, mask, incrocio_rilevato, errore_x
 
 # ==========================================
 # 7. MACCHINA A STATI LOGICA DECISIONALE
