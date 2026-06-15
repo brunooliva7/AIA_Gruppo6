@@ -10,14 +10,10 @@ from cvlib.object_detection import YOLO
 import winsound  # Riconoscimento audio e feedback acustici di sistema
 
 
-# ---------------------------------------------------------
-# 0. PARAMETRI RICONOSCIMENTO VOCALE
-# ---------------------------------------------------------
-#PAROLA CHIAVE ATTIVAZIONE VOCALE
-WAKE_WORD = "assistente"
+
+
 
 # --- STRUMENTI DI SINCRONIZZAZIONE (CONCORRENZA) ---
-coda_comandi_utente = queue.Queue() # Passa i dati dall'Orecchio al Main
 coda_testo_da_leggere = queue.Queue() # Passa i testi dal Main/Orecchio alla Bocca
 
 # IL SEMAFORO! (Event)
@@ -95,17 +91,6 @@ testo_rilevato_global = "In attesa di cartelli..."
 stato_attuale = STATO_NAVIGAZIONE
 direzione_da_prendere = None  
 tempo_inizio_svolta = 0
-
-# Flag che congela la macchina a stati durante l'ascolto vocale attivo.
-# True  → il sistema ha sentito "assistente" e sta aspettando/elaborando un comando.
-# False → navigazione normale, la macchina a stati gira liberamente.
-modalita_ascolto_vocale = False
-
-# Flag che mantiene la sessione vocale aperta tra un comando e l'altro.
-# True  → dopo aver eseguito un comando, il microfono rimane attivo senza richiedere
-#          di ridire "assistente": l'utente può dare un altro comando direttamente.
-# False → sessione chiusa, si torna ad aspettare la wake word.
-sessione_vocale_attiva = False
 
 # Gestione Coda Vocale asincrona (Evita che la telecamera scatti mentre il PC parla)
 coda_voce = queue.Queue()
@@ -257,106 +242,37 @@ def invia_voce(testo, prioritario=False):
         # Se scartato, non toccare il semaforo → rimane verde, l'orecchio continua ad ascoltare
 
 
-# ================================
-# 4. THREAD RICONOSCIMENTO VOCE 
-# ================================
+# ====================================
+# 4. THREAD GESTIONE COMANDI TASTIERA
+# ====================================
 
-# --- FUNZIONE DI UTILITÀ: FEEDBACK CHIUSURA ---
-def esegui_bip_chiusura():
-    """Emette un doppio tono discendente per indicare che il microfono è chiuso."""
-    winsound.Beep(600, 150)
-    winsound.Beep(450, 150)
-    print("[SESSIONE CHIUSA] Microfono disattivato. Ritorno in background.\n")
-
-
-# --- 2. IL THREAD DI ASCOLTO (Con Adattamento Ambientale Continuo) ---
-def thread_ascolto_google():
-    global modalita_ascolto_vocale, sessione_vocale_attiva
-    riconoscitore = sr.Recognizer()
-    microfono = sr.Microphone()
+def gestione_comandi_tastiera(tasto,monitoraggio_attivo,ultimo_annuncio_ambiente):
+    """
+    Gestisce l'attivazione del monitoraggio con il tasto 'W' 
+    e la disattivazione con il tasto 'S'.
     
-    riconoscitore.pause_threshold = 0.5
-    riconoscitore.non_speaking_duration = 0.4
-    
-    with microfono as source:
-        print("[MICROFONO] Calibrazione iniziale al boot...")
-        riconoscitore.adjust_for_ambient_noise(source, duration=2.0)
-        print(f"Calibrazione completata. Di' '{WAKE_WORD}' per attivare.")
-        
-        while True:
+    Ritorna il nuovo stato del monitoraggio (True o False).
+    """
+    continua_ciclo = True
+    #Controllo se viene premuto 'W' (sia minuscolo che maiuscolo)
+    if tasto == ord('w') or tasto == ord('W'):
+        if not monitoraggio_attivo:
+            monitoraggio_attivo = True
+            ultimo_annuncio_ambiente = 0  # Forza la lettura vocale immediata degli oggetti
+            invia_voce("Monitoraggio ambientale attivato. Metti il telefono parallelo al petto.", prioritario=True)
+            print("[SISTEMA] Monitoraggio Ambientale Continuo: ACCESO")
+            
+    # Controllo se viene premuto 'S' (sia minuscolo che maiuscolo)
+    elif tasto == ord('s') or tasto == ord('S'):
+        if monitoraggio_attivo:
+            monitoraggio_attivo = False
+            invia_voce("Monitoraggio ambientale disattivato. Metti il telefono parallelo al pavimento. Torno alla navigazione.", prioritario=True)
+            print("[SISTEMA] Monitoraggio Ambientale Continuo: SPENTO")
+            
+    return monitoraggio_attivo,ultimo_annuncio_ambiente,continua_ciclo
 
-            # -------------------------------------------------------
-            # FASE 1: ASCOLTO PASSIVO — attesa wake word
-            # Saltata se la sessione è già aperta (comando precedente eseguito)
-            # -------------------------------------------------------
-            if not sessione_vocale_attiva:
-                riconoscitore.dynamic_energy_threshold = True
-                semaforo_voce.wait()
 
-                try:
-                    audio_sveglia = riconoscitore.listen(source, timeout=None, phrase_time_limit=3)
-                    testo_sveglia = riconoscitore.recognize_google(audio_sveglia, language="it-IT").lower()
-                except Exception:
-                    continue
 
-                if WAKE_WORD not in testo_sveglia:
-                    continue  # Parola sbagliata, torna ad ascoltare
-
-                # CONGELA SUBITO la macchina a stati, ancora prima di parlare.
-                # Chiude la race window tra riconoscimento wake word e impostazione flag.
-                modalita_ascolto_vocale = True
-                print("\n[TRIGGER] Riconosciuta parola chiave!")
-
-            else:
-                # Sessione già aperta: aspetta solo che il sistema finisca di parlare
-                print("[SESSIONE APERTA] In attesa del prossimo comando...")
-                semaforo_voce.wait()
-
-            # -------------------------------------------------------
-            # FASE 2: ASCOLTO COMANDO (sia da wake word che da sessione aperta)
-            # -------------------------------------------------------
-            # Nota: per il path wake word, modalita_ascolto_vocale è già True (impostato sopra).
-            # Per il path sessione aperta lo impostiamo qui.
-            modalita_ascolto_vocale = True
-            sessione_vocale_attiva  = False  # verrà rimessa a True dal main se la sessione resta aperta
-
-            riconoscitore.dynamic_energy_threshold = False
-            invia_voce("Sono in ascolto.", prioritario=True)
-            time.sleep(0.1)
-            semaforo_voce.wait()
-            winsound.Beep(800, 200)
-            print("[REGISTRAZIONE] PARLA ORA!...")
-
-            try:
-                audio_comando  = riconoscitore.listen(source, timeout=5, phrase_time_limit=None)
-                print("[CLOUD] Elaborazione in corso...")
-                comando_finale = riconoscitore.recognize_google(audio_comando, language="it-IT").lower()
-                print(f"[TRADOTTO] Hai detto: '{comando_finale}'")
-                coda_comandi_utente.put(comando_finale)
-                # Il main loop decide se tenere la sessione aperta o chiuderla
-
-            except sr.WaitTimeoutError:
-                print("[TIMEOUT] Nessun comando rilevato.")
-                invia_voce("Non ho sentito nulla. Chiudo la sessione.", prioritario=True)
-                semaforo_voce.wait()
-                esegui_bip_chiusura()
-                modalita_ascolto_vocale = False
-                sessione_vocale_attiva  = False
-
-            except sr.UnknownValueError:
-                print("[STT ERROR] Audio incomprensibile.")
-                invia_voce("Non ho capito. Riprova o di' annulla per chiudere.", prioritario=True)
-                semaforo_voce.wait()
-                # Sessione rimane aperta: l'utente può riprovare
-                sessione_vocale_attiva = True
-
-            except sr.RequestError as e:
-                print(f"[ERRORE RETE] {e}")
-                invia_voce("Errore di rete. Chiudo la sessione.", prioritario=True)
-                semaforo_voce.wait()
-                esegui_bip_chiusura()
-                modalita_ascolto_vocale = False
-                sessione_vocale_attiva  = False
 
 # ==========================================
 # 6. FUNZIONE ELABORAZIONE LINEE GUIDA BLU
@@ -625,7 +541,7 @@ def gestisci_macchina_a_stati(errore_x, incrocio_rilevato, cartelli_disponibili,
 # ==========================================
 def applica_overlay_grafico(frame, stato, mappa_cartelli):
     # Se il sistema è in modalità ascolto vocale, mostralo chiaramente
-    if modalita_ascolto_vocale:
+    if monitoraggio_ambientale_attivo:
         cv2.putText(frame, "STATO ASSISTENTE: ASCOLTO VOCALE", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
     else:
         cv2.putText(frame, f"STATO ASSISTENTE: {stato}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
@@ -640,9 +556,11 @@ def applica_overlay_grafico(frame, stato, mappa_cartelli):
 def main():
     global frame_condiviso, mappa_cartelli_global, running
     global stato_attuale, direzione_da_prendere, tempo_inizio_svolta
-    global modalita_ascolto_vocale, sessione_vocale_attiva
+    global monitoraggio_ambientale_attivo
     
-    
+    # --- 1. NUOVE VARIABILI DI STATO PER IL MONITORAGGIO ---
+    monitoraggio_ambientale_attivo = False
+    ultimo_annuncio_ambiente = 0
 
     # 1. Caricamento YOLO
     print("1/3 Caricamento Rete Neurale YOLO...")
@@ -664,7 +582,6 @@ def main():
     threading.Thread(target=thread_yolo,args=(yolo_model,) , daemon=True).start()
     threading.Thread(target=thread_elaborazione_ocr,args=(lettore_ocr,) , daemon=True).start()
     threading.Thread(target=thread_bocca_tts_unico, daemon=True).start()
-    threading.Thread(target=thread_ascolto_google, daemon=True).start()
     
     invia_voce("Dispositivo di assistenza attivo e in ascolto. Puoi iniziare a camminare.", prioritario=True)
     
@@ -699,41 +616,17 @@ def main():
             except IndexError: pass
 
         
-        #Logica Riconoscimento Vocale
-        if not coda_comandi_utente.empty():
-            comando = coda_comandi_utente.get()
-            print(f"[MAIN] Ricevuto da eseguire: '{comando}'")
-            
-            # --- LOGICA DI NAVIGAZIONE E GESTIONE INTENTI ---
-            if "ambiente" in comando or "intorno" in comando:
-                # 1. Annuncio vocale immediato
-                invia_voce("Avvio la visione ambientale. Metti il telefono parallelo al petto.", prioritario=True)
-                semaforo_voce.wait()
-
-                # 2. Loop live: continua a leggere frame mentre YOLO scansiona
-                print("[AMBIENTE] Attendo scansione YOLO sul frame attuale...")
-                attesa_max = 4.0
-                t_start = time.time()
-
-                while (time.time() - t_start) < attesa_max:
-                    ret_a, frame_a = video.read()
-                    if ret_a:
-                        if not dati_condivisi["yolo_occupato"]:
-                            dati_condivisi["frame_da_analizzare"] = frame_a.copy()
-                        cv2.imshow("Pepper Navigation System", frame_a)
-                        cv2.waitKey(1)
-                    if not dati_condivisi["yolo_occupato"] and dati_condivisi["frame_da_analizzare"] is not None:
-                        time.sleep(0.15)
-                        break
-                    time.sleep(0.03)
-
-                # 3. Leggi risultati freschi e descrivi
+        #Logica Attivazione YOLO
+        if monitoraggio_ambientale_attivo:
+            tempo_corrente = time.time()
+            if tempo_corrente - ultimo_annuncio_ambiente > 7.0:
+                # Estraiamo i dati correnti in modo sicuro senza piantarci in loop stabili
                 labels_viste = list(dati_condivisi.get("yolo_labels", []))
                 bbox_visti   = list(dati_condivisi.get("yolo_bbox", []))
-                print(f"[AMBIENTE] YOLO ha rilevato: {labels_viste}")
 
                 if not labels_viste:
-                    invia_voce("Non rilevo oggetti significativi attorno a te in questo momento.", prioritario=True)
+                    # Se non c'è nulla o YOLO sta ancora calcolando il primissimo frame, non blocchiamo il programma
+                    print("[AMBIENTE] Nessun oggetto rilevato nei thread di background...")
                 else:
                     oggetti_descritti = []
                     TRADUZIONI = {
@@ -744,11 +637,7 @@ def main():
                         'laptop': 'un computer portatile', 'cell phone': 'un telefono',
                         'bottle': 'una bottiglia', 'cup': 'una tazza',
                         'book': 'un libro', 'backpack': 'uno zaino',
-                        'umbrella': 'un ombrello', 'suitcase': 'una valigia',
-                        'bicycle': 'una bicicletta', 'car': 'una macchina',
-                        'motorcycle': 'una moto', 'bus': 'un autobus',
-                        'truck': 'un camion', 'traffic light': 'un semaforo',
-                        'stop sign': 'un segnale di stop',
+                        'umbrella': 'un ombrello', 'suitcase': 'una valigia'
                     }
                     for i, label in enumerate(labels_viste):
                         try:
@@ -757,7 +646,8 @@ def main():
                             distanza_cm = calcola_distanza(ALTEZZE_REALI_CM.get(label, ALTEZZA_DEFAULT), alt_pixel)
                             distanza_m  = distanza_cm / 100.0
                             centro_x    = (x_min + x_max) / 2
-                            larghezza_f = frame_a.shape[1] if ret_a else frame.shape[1]
+                            larghezza_f = frame.shape[1]
+                            
                             if centro_x < larghezza_f / 3:
                                 lato = "alla tua sinistra"
                             elif centro_x > larghezza_f * 2 / 3:
@@ -776,33 +666,8 @@ def main():
                     invia_voce(descrizione, prioritario=True)
 
                 semaforo_voce.wait()
-                # Sessione rimane aperta: l'utente può chiedere altro senza ridire "assistente"
-                invia_voce("Posso aiutarti con altro?", prioritario=True)
-                semaforo_voce.wait()
-                sessione_vocale_attiva = True
-                print("[MAIN] Sessione vocale mantenuta aperta.")
-  
-            elif "grazie" in comando or "annulla" in comando or "chiudi" in comando:
-                # Parola di chiusura esplicita: termina la sessione
-                invia_voce("Va bene, torno alla navigazione. Rimetti il telefono parallelo al pavimento", prioritario=True)
-                semaforo_voce.wait()
-                esegui_bip_chiusura()
-                modalita_ascolto_vocale = False
-                sessione_vocale_attiva  = False
-                # Resetta la macchina a stati e svuota la coda TTS per evitare
-                # che gli eventi accumulati durante il freeze vengano scaricati in raffica
-                stato_attuale = STATO_NAVIGAZIONE
-                while not coda_voce_unica.empty():
-                    try: coda_voce_unica.get_nowait(); coda_voce_unica.task_done()
-                    except: break
-                print("[MAIN] Sessione vocale chiusa dall'utente.")
-                continue  # Salta il blocco sotto, non riaprire la sessione
-                
-            else:
-                invia_voce("Non ho capito. Puoi ripetere o di' annulla per chiudere.", prioritario=True)
-                semaforo_voce.wait()
-                # Sessione rimane aperta anche in caso di comando non riconosciuto
-                sessione_vocale_attiva = True
+                ultimo_annuncio_ambiente = tempo_corrente
+            
 
             # Comando gestito (non di chiusura): resetta stato e riattiva la navigazione
             # Svuota anche la coda TTS da eventuali messaggi accodati durante il freeze
@@ -810,8 +675,6 @@ def main():
             while not coda_voce_unica.empty():
                 try: coda_voce_unica.get_nowait(); coda_voce_unica.task_done()
                 except: break
-            modalita_ascolto_vocale = False
-            print("[MAIN] Comando eseguito. Sessione vocale:", "APERTA" if sessione_vocale_attiva else "CHIUSA")
 
             
         # Carica il frame corrente nella memoria condivisa per l'OCR thread
@@ -826,15 +689,27 @@ def main():
         # FASE 3: MACCHINA A STATI (Genera i comandi vocali in coda)
         # Congelata mentre il sistema è in modalità ascolto vocale attivo:
         # evita che indicazioni di percorso si sovrappongano alla gestione del comando.
-        if not modalita_ascolto_vocale:
+        if not monitoraggio_ambientale_attivo:
             gestisci_macchina_a_stati(errore_x, incrocio_rilevato, cartelli_disponibili, larghezza=frame.shape[1])
+
+        
+        # --- INTERCETTAZIONE TASTIERA REFACTORIZZATA ---
+        tasto = cv2.waitKey(1) & 0xFF
+        
+        # Utilizzo della funzione esterna per l'aggiornamento dei parametri
+        monitoraggio_ambientale_attivo, ultimo_annuncio_ambiente,continua = gestione_comandi_tastiera(
+            tasto, monitoraggio_ambientale_attivo, ultimo_annuncio_ambiente
+        )
+
+        if not continua:
+            break
         
         # Mostriamo a schermo i dati (per chi monitora il test da PC)
         cv2.putText(frame_linee, f"STATO: {stato_attuale}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
         
         frame_finale = applica_overlay_grafico(frame_linee, stato_attuale, cartelli_disponibili)
         cv2.imshow("Maschera", maschera_linee)
-        cv2.imshow("Pepper Navigation System", frame_finale)
+        cv2.imshow("Navigation System", frame_finale)
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
