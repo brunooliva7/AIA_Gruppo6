@@ -114,6 +114,10 @@ stato_attuale = STATO_NAVIGAZIONE
 direzione_da_prendere = None  
 tempo_inizio_svolta = 0
 
+# Flag: True mentre si attende che l'utente torni al centro dopo una correzione.
+# Blocca la ripetizione del comando di correzione finché il centro non è ritrovato.
+correzione_in_corso = False
+
 # Gestione Coda Vocale asincrona (Evita che la telecamera scatti mentre il PC parla)
 coda_voce = queue.Queue()
 ultimo_messaggio_navigazione = ""
@@ -414,6 +418,7 @@ def elabora_linee_guida(frame, blu_lower, blu_upper):
 def gestisci_macchina_a_stati(errore_x, incrocio_rilevato, cartelli_disponibili,larghezza):
     global stato_attuale, direzione_da_prendere, tempo_inizio_svolta, mappa_cartelli_global
     global contatore_linea_persa, fase_recupero_annunciata, diramazione_vista_prima
+    global correzione_in_corso
 
     centro_camera = larghezza // 2
     
@@ -422,6 +427,7 @@ def gestisci_macchina_a_stati(errore_x, incrocio_rilevato, cartelli_disponibili,
     # ----------------------------------------------------
     if stato_attuale == STATO_NAVIGAZIONE:
         if incrocio_rilevato:
+            correzione_in_corso = False   # Reset flag al cambio di stato
             stato_attuale = STATO_INCROCIO_ATTESA
             mappa_cartelli_global = {}
             dati_condivisi["ocr_cartelli"] = {}
@@ -434,19 +440,35 @@ def gestisci_macchina_a_stati(errore_x, incrocio_rilevato, cartelli_disponibili,
             lato = "destra" if errore_x < 0 else "sinistra"
 
             if abs_err <= TOLLERANZA_OK:
-                # Zona verde: centrato
-                invia_voce("Sei centrato sulla linea. Procedi dritto.")
+                # CENTRO RITROVATO: resetta il blocco e conferma solo se si era in correzione
+                if correzione_in_corso:
+                    correzione_in_corso = False
+                    invia_voce("Centro ritrovato. Procedi dritto.", prioritario=True)
+                else:
+                    invia_voce("Sei centrato sulla linea. Procedi dritto.")
 
             else:
+<<<<<<< HEAD
                 # Zona rossa: rischio imminente perdita linea
                 if lato == "destra":
                     invia_voce(f"Attenzione! Stai uscendo dalla linea verso {lato}. Correzione immediata verso sinistra.", prioritario=True)
                 else:
                     invia_voce(f"Attenzione! Stai uscendo dalla linea verso {lato}. Correzione immediata verso destra.", prioritario=True)
+=======
+                # FUORI DAL CENTRO: avvisa solo se non è già in corso una manovra di correzione
+                if not correzione_in_corso:
+                    correzione_in_corso = True
+                    if lato == "destra":
+                        invia_voce(f"Attenzione! Stai uscendo dalla linea verso {lato}. Correzione immediata verso sinistra.", prioritario=True)
+                    else:
+                        invia_voce(f"Attenzione! Stai uscendo dalla linea verso {lato}. Correzione immediata verso destra.", prioritario=True)
+                # Se correzione_in_corso è già True: silenzio, si aspetta il ritrovamento del centro
+>>>>>>> 6a80799b1faf03b27c647e48420c431f35bc033f
 
         else:
             # --- LOGICA DI GESTIONE E RI-ALLINEAMENTO LINEA PERSA ---
             if contatore_linea_persa >= SOGLIA_FRAME_LINEA_PERSA:
+                correzione_in_corso = False   # Reset flag al cambio di stato
                 stato_attuale = STATO_LINEA_PERSA
                 fase_recupero_annunciata = 0
                 print("[STATO] Transizione a LINEA_PERSA.")
