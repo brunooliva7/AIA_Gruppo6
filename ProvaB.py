@@ -431,23 +431,18 @@ def gestisci_macchina_a_stati(errore_x, incrocio_rilevato, cartelli_disponibili,
             # LINEA VISIBILE - Comandi proporzionali all'errore (4 zone di confidenza)
             fase_recupero_annunciata = 0
             abs_err = abs(errore_x)
-            lato = "destra" if errore_x > 0 else "sinistra"
+            lato = "destra" if errore_x < 0 else "sinistra"
 
             if abs_err <= TOLLERANZA_OK:
                 # Zona verde: centrato
                 invia_voce("Sei centrato sulla linea. Procedi dritto.")
 
-            elif abs_err <= TOLLERANZA_MEDIA:
-                # Zona gialla: scostamento lieve
-                invia_voce(f"Leggero scostamento verso {lato}. Fai un piccolo passo laterale verso {lato}.")
-
-            elif abs_err <= TOLLERANZA_FORTE:
-                # Zona arancione: correzione decisa
-                invia_voce(f"Sei fuori dal centro verso {lato}. Fai due passi laterali verso {lato}.")
-
             else:
                 # Zona rossa: rischio imminente perdita linea
-                invia_voce(f"Attenzione! Stai uscendo dalla linea verso {lato}. Correzione immediata verso {lato}.", prioritario=True)
+                if lato == "destra":
+                    invia_voce(f"Attenzione! Stai uscendo dalla linea verso {lato}. Correzione immediata verso sinistra.", prioritario=True)
+                else:
+                    invia_voce(f"Attenzione! Stai uscendo dalla linea verso {lato}. Correzione immediata verso destra.", prioritario=True)
 
         else:
             # --- LOGICA DI GESTIONE E RI-ALLINEAMENTO LINEA PERSA ---
