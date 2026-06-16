@@ -211,24 +211,70 @@ def invia_alert(etichetta, distanza):
 # 1. Usa UNA SOLA CODA per tutta la voce del sistema
 coda_voce_unica = queue.Queue()
 
+# Riferimento condiviso all'oggetto SpVoice, necessario per chiamare
+# Skip() dall'esterno del thread TTS e interrompere il parlato in corso.
+_voce_sapi = None
+_voce_lock  = threading.Lock()   # protegge l'accesso a _voce_sapi
+
+# Flag: quando True il thread TTS deve saltare la frase corrente
+_flag_interrompi = threading.Event()
+
+
+def _stop_sapi_now():
+    """
+    Interrompe immediatamente l'eventuale frase in riproduzione tramite
+    SpVoice.Skip(), svuota la coda e rilascia il semaforo.
+    Può essere chiamata da qualsiasi thread.
+    """
+    global _voce_sapi
+    _flag_interrompi.set()                  # segnala al thread TTS di abortire
+    with _voce_lock:
+        if _voce_sapi is not None:
+            try:
+                # SVSFlagsAsync=1: Skip è asincrono, non blocca
+                _voce_sapi.Skip("Sentence", 999)
+            except Exception:
+                pass
+    # Svuota i messaggi in attesa
+    while not coda_voce_unica.empty():
+        try:
+            coda_voce_unica.get_nowait()
+            coda_voce_unica.task_done()
+        except queue.Empty:
+            break
+    semaforo_voce.set()                     # sblocca il semaforo in ogni caso
+
+
 # 2. Unico Thread per la gestione del Text-To-Speech
 def thread_bocca_tts_unico():
+    global _voce_sapi
     import pythoncom
     import win32com.client
     pythoncom.CoInitialize()  # Obbligatorio per usare COM in un thread secondario
 
-    voce = win32com.client.Dispatch("SAPI.SpVoice")
-    voce.Rate = 1  # Velocità: da -10 (lento) a +10 (veloce). 1 = leggermente sopra il normale
+    with _voce_lock:
+        _voce_sapi = win32com.client.Dispatch("SAPI.SpVoice")
+        _voce_sapi.Rate = 1  # Velocità: da -10 (lento) a +10 (veloce). 1 = leggermente sopra il normale
 
     print("[THREAD VOCE UNIFICATO] Pronto.")
     while dati_condivisi["running"]:
         try:
             testo = coda_voce_unica.get(timeout=0.5)
 
+            # Se il flag era settato da una richiesta di interruzione precedente, lo consumiamo
+            # e saltiamo eventuali messaggi già superati rimasti in coda
+            if _flag_interrompi.is_set():
+                _flag_interrompi.clear()
+                coda_voce_unica.task_done()
+                continue
+
             semaforo_voce.clear()  # Rosso: il robot sta parlando, l'orecchio aspetta
             print(f"\n>>> [SISTEMA PARLA]: {testo} <<<\n")
 
-            voce.Speak(testo)      # Sincrono per default: blocca finché non ha finito
+            _flag_interrompi.clear()
+            with _voce_lock:
+                # SVSFIsNotXML | SVSFlagsAsync = 0: sincrono, si interrompe con Skip()
+                _voce_sapi.Speak(testo, 0)
 
             semaforo_voce.set()    # Verde: il robot ha finito, l'orecchio può ascoltare
             coda_voce_unica.task_done()
@@ -238,30 +284,48 @@ def thread_bocca_tts_unico():
             print(f"[ERRORE AUDIO] {e}")
             semaforo_voce.set()    # In caso di errore, sblocca comunque il semaforo
 
-# 3. Aggiorna la funzione invia_voce per usare la nuova coda
-def invia_voce(testo, prioritario=False):
+
+# 3. invia_voce — versione con supporto all'interruzione immediata
+def invia_voce(testo, prioritario=False, interrompi=False):
+    """
+    Accoda un messaggio vocale.
+
+    prioritario=True  → svuota la coda e mette il nuovo testo in testa,
+                        ma NON interrompe la frase già in riproduzione.
+    interrompi=True   → interrompe IMMEDIATAMENTE l'audio in corso via
+                        SpVoice.Skip() e poi riproduce il nuovo testo.
+                        Usare solo per i tre scenari critici:
+                        uscita dalla linea, incrocio, lettura cartello.
+    """
     global ultimo_messaggio_navigazione, ultimo_tempo_voce
     tempo_attuale = time.time()
 
-    if prioritario:
-        semaforo_voce.clear()  # ← Solo qui, quando siamo CERTI di parlare
+    if interrompi:
+        # Ferma subito il parlato corrente, poi accoda il nuovo messaggio
+        _stop_sapi_now()
+        _flag_interrompi.clear()            # il prossimo messaggio deve essere riprodotto
+        coda_voce_unica.put(testo)
+        ultimo_messaggio_navigazione = ''
+        ultimo_tempo_voce = 0
+
+    elif prioritario:
         while not coda_voce_unica.empty():
             try:
                 coda_voce_unica.get_nowait()
                 coda_voce_unica.task_done()
             except queue.Empty:
                 break
+        semaforo_voce.clear()
         coda_voce_unica.put(testo)
         ultimo_messaggio_navigazione = ''
         ultimo_tempo_voce = 0
 
     else:
         if testo != ultimo_messaggio_navigazione or (tempo_attuale - ultimo_tempo_voce) > INTERVALLO_VOCE:
-            semaforo_voce.clear()  # ← Solo se il messaggio viene davvero messo in coda
+            semaforo_voce.clear()
             coda_voce_unica.put(testo)
             ultimo_messaggio_navigazione = testo
             ultimo_tempo_voce = tempo_attuale
-        # Se scartato, non toccare il semaforo → rimane verde, l'orecchio continua ad ascoltare
 
 
 # ====================================
@@ -425,7 +489,8 @@ def gestisci_macchina_a_stati(errore_x, incrocio_rilevato, cartelli_disponibili,
             stato_attuale = STATO_INCROCIO_ATTESA
             mappa_cartelli_global = {}
             dati_condivisi["ocr_cartelli"] = {}
-            invia_voce("Incrocio rilevato. Rallenta e fermati. Sto leggendo i cartelli.", prioritario=True)
+            # [INTERRUZIONE CRITICA] Incrocio: ferma subito l'audio in corso
+            invia_voce("Incrocio rilevato. Rallenta e fermati. Sto leggendo i cartelli.", interrompi=True)
 
         elif errore_x is not None:
             # LINEA VISIBILE - Comandi proporzionali all'errore (4 zone di confidenza)
@@ -438,11 +503,11 @@ def gestisci_macchina_a_stati(errore_x, incrocio_rilevato, cartelli_disponibili,
                 invia_voce("Sei centrato sulla linea. Procedi dritto.")
 
             else:
-                # Zona rossa: rischio imminente perdita linea
+                # Zona critica: uscita dalla linea — interruzione immediata dell'audio
                 if lato == "destra":
-                    invia_voce(f"Attenzione! Stai uscendo dalla linea verso {lato}. Correzione immediata verso sinistra.", prioritario=True)
+                    invia_voce(f"Attenzione! Stai uscendo dalla linea verso {lato}. Correzione immediata verso sinistra.", interrompi=True)
                 else:
-                    invia_voce(f"Attenzione! Stai uscendo dalla linea verso {lato}. Correzione immediata verso destra.", prioritario=True)
+                    invia_voce(f"Attenzione! Stai uscendo dalla linea verso {lato}. Correzione immediata verso destra.", interrompi=True)
 
         else:
             # --- LOGICA DI GESTIONE E RI-ALLINEAMENTO LINEA PERSA ---
@@ -547,9 +612,9 @@ def gestisci_macchina_a_stati(errore_x, incrocio_rilevato, cartelli_disponibili,
             # Sincronizza la mappa globale per consentire il funzionamento del Microfono
             mappa_cartelli_global = cartelli_disponibili.copy()
 
-            # Annuncia vocalmente i cartelli trovati
+            # [INTERRUZIONE CRITICA] Cartello rilevato: ferma subito l'audio in corso
             elenco = ", oppure ".join(list(cartelli_disponibili.keys()))
-            invia_voce(f" Ho Letto : {elenco}.", prioritario=True)
+            invia_voce(f" Ho Letto : {elenco}.", interrompi=True)
 
             # --- LOGICA DI TRANSIZIONE ALLO STATO DI SVOLTA AUTOMATICA ---
             # Estraiamo la prima direzione valida trovata nei cartelli
@@ -560,13 +625,12 @@ def gestisci_macchina_a_stati(errore_x, incrocio_rilevato, cartelli_disponibili,
                     stato_attuale = STATO_SVOLTA_AUTOMATICA   
                     print(f"[STATO] Transizione a SVOLTA AUTOMATICA. Direzione: {direzione_da_prendere}")
 
-                    
                     if direzione == "SINISTRA":
-                        invia_voce(f"Ho letto {testo}. Ruota adesso a sinistra sul posto di novanta gradi.", prioritario=True)
+                        invia_voce(f"Ho letto {testo}. Ruota adesso a sinistra sul posto di novanta gradi.", interrompi=True)
                     elif direzione == "DESTRA":
-                        invia_voce(f"Ho letto {testo}. Ruota adesso a destra sul posto di novanta gradi.", prioritario=True)
+                        invia_voce(f"Ho letto {testo}. Ruota adesso a destra sul posto di novanta gradi.", interrompi=True)
                     else: # DRITTO
-                        invia_voce(f"Ho letto {testo}. Procedi dritto in avanti per superare l'incrocio.", prioritario=True)
+                        invia_voce(f"Ho letto {testo}. Procedi dritto in avanti per superare l'incrocio.", interrompi=True)
                     
                     print(f"[STATO] Transizione a SVOLTA AUTOMATICA. Direzione: {direzione_da_prendere}")
                     break # Usciamo dal ciclo dei cartelli
