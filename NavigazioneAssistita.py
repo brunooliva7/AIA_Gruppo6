@@ -43,21 +43,6 @@ TRADUZIONI_ITA = {
 BLU_LOWER = np.array([95, 60, 25])
 BLU_UPPER = np.array([135, 255, 255])
 
-# Soglia minima di saturazione: pixel con S < questo valore sono bianchi/riflessi
-# e vengono esclusi dalla maschera blu anche se l'hue è corretto.
-SATURAZIONE_MIN_LINEA = 55
-
-# Soglia massima di Value: pixel con V > questo valore sono sovraesposti (riflesso speculare)
-# e vengono esclusi indipendentemente dal colore.
-VALUE_MAX_RIFLESSO = 245
-
-# Area minima contorno valido (aumentata rispetto a 1500 per scartare blob da ombre)
-AREA_MIN_CONTORNO = 2500
-
-# Aspect ratio massimo del bounding rect del contorno:
-# un blob molto allungato orizzontalmente è probabile ombra, non linea guida.
-ASPECT_RATIO_MAX = 8.0
-
 SOGLIA_MINIMA_PIXEL       = 3000
 SOGLIA_Y_INCROCIO         = 320
 SOGLIA_FRAME_LINEA_PERSA  = 15
@@ -347,57 +332,30 @@ class AnalizzatoreLinea:
         incrocio_rilevato = False
         errore_x = 0
 
-        # --- PREPROCESSING ROBUSTO ALLA LUCE ---
-        # 1. Sfocatura per ridurre rumore e riflessi puntuali
         blur = cv2.GaussianBlur(frame, (7, 7), 0)
-
-        # 2. Converti in HSV
-        hsv = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
+        hsv  = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
         H, S, V = cv2.split(hsv)
 
-        # 3. CLAHE su V: normalizza l'esposizione localmente.
-        #    Riduce l'effetto delle ombre (zone scure tornano leggibili)
-        #    e attenua i picchi di riflesso (zone sovraesposte vengono compresse).
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        # CLAHE su V: normalizza esposizione localmente senza tagliare nulla.
+        # Comprime i picchi di riflesso e solleva le zone d'ombra, rendendo
+        # la segmentazione colore stabile indipendentemente dalla luce.
+        clahe  = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
         V_norm = clahe.apply(V)
         hsv_norm = cv2.merge([H, S, V_norm])
 
-        # 4. Maschera colore blu sul HSV normalizzato
-        mask_blu = cv2.inRange(hsv_norm, blu_lower, blu_upper)
+        mask = cv2.inRange(hsv_norm, blu_lower, blu_upper)
 
-        # 5. Maschera anti-riflesso: esclude pixel a saturazione troppo bassa
-        #    (bianco/grigio chiaro da riflesso speculare) anche se hue è nell'intervallo blu.
-        mask_sat = cv2.threshold(S, SATURAZIONE_MIN_LINEA, 255, cv2.THRESH_BINARY)[1]
+        # OPEN piccolo: rimuove pixel isolati di rumore senza intaccare la linea
+        k_open  = np.ones((3, 3), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k_open)
 
-        # 6. Maschera anti-sovraesposizione: esclude pixel quasi bianchi (V originale > soglia)
-        mask_no_riflesso = cv2.threshold(V, VALUE_MAX_RIFLESSO, 255, cv2.THRESH_BINARY_INV)[1]
-
-        # 7. Maschera finale: blu normalizzato AND saturazione sufficiente AND non sovraesposto
-        mask = cv2.bitwise_and(mask_blu, mask_sat)
-        mask = cv2.bitwise_and(mask, mask_no_riflesso)
-
-        # 8. Pulizia morfologica a due stadi:
-        #    - OPEN (erosione + dilatazione): rimuove piccoli blob da riflessi puntuali e rumore
-        #    - CLOSE (dilatazione + erosione): chiude i buchi nella linea causati dalle ombre
-        k_open  = np.ones((5, 5), np.uint8)
-        k_close = np.ones((11, 11), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k_open)
+        # CLOSE grande: ricostruisce la continuità della linea nei punti
+        # dove il riflesso o l'ombra la interrompono fisicamente.
+        k_close = np.ones((25, 25), np.uint8)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close)
 
-        # --- ESTRAZIONE CONTORNI ---
         contorni, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        contorni_validi = []
-        for c in contorni:
-            area = cv2.contourArea(c)
-            if area < AREA_MIN_CONTORNO:
-                continue
-            # Filtro aspect ratio: scarta blob eccessivamente piatti (ombre orizzontali)
-            x, y, w, h = cv2.boundingRect(c)
-            ratio = w / h if h > 0 else 999
-            if ratio > ASPECT_RATIO_MAX:
-                continue
-            contorni_validi.append(c)
+        contorni_validi = [c for c in contorni if cv2.contourArea(c) > 1500]
 
         if len(contorni_validi) >= 2:
             aree = sorted([cv2.contourArea(c) for c in contorni_validi], reverse=True)
