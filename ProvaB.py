@@ -609,14 +609,11 @@ class OverlayGrafico:
 
     def applica(self, frame, macchina: MacchinaStati, monitoraggio_attivo: bool):
         if monitoraggio_attivo:
-            cv2.putText(frame, "STATO ASSISTENTE: ASCOLTO VOCALE",
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
+            cv2.putText(frame, "STATO ASSISTENTE: ASCOLTO VOCALE", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
         else:
-            cv2.putText(frame, f"STATO ASSISTENTE: {macchina.stato}",
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
+            cv2.putText(frame, f"STATO ASSISTENTE: {macchina.stato}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
         if macchina.stato == STATO_SVOLTA_AUTOMATICA and macchina.direzione_da_prendere:
-            cv2.putText(frame, f"GUIDA ALLA MANOVRA: {macchina.direzione_da_prendere}",
-                        (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            cv2.putText(frame, f"GUIDA ALLA MANOVRA: {macchina.direzione_da_prendere}", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
         return frame
 
 
@@ -695,9 +692,6 @@ def main():
 
         if tasto == ord('q'):
             break
-
-        cv2.putText(frame_linee, f"STATO: {macchina.stato}", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
 
         frame_finale = overlay.applica(frame_linee, macchina, monitoraggio.attivo)
         cv2.imshow("Maschera", maschera_linee)
