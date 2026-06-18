@@ -122,7 +122,7 @@ correzione_in_corso = False
 coda_voce = queue.Queue()
 ultimo_messaggio_navigazione = ""
 ultimo_tempo_voce = 0
-INTERVALLO_VOCE = 1.8  # Secondi di silenzio obbligatori tra indicazioni di linea ripetitive
+INTERVALLO_VOCE = 2.2  # Secondi di silenzio obbligatori tra indicazioni di linea ripetitive
 
 
 
@@ -448,13 +448,7 @@ def gestisci_macchina_a_stati(errore_x, incrocio_rilevato, cartelli_disponibili,
                     invia_voce("Sei centrato sulla linea. Procedi dritto.")
 
             else:
-<<<<<<< HEAD
-                # Zona rossa: rischio imminente perdita linea
-                if lato == "destra":
-                    invia_voce(f"Attenzione! Stai uscendo dalla linea verso {lato}. Correzione immediata verso sinistra.", prioritario=True)
-                else:
-                    invia_voce(f"Attenzione! Stai uscendo dalla linea verso {lato}. Correzione immediata verso destra.", prioritario=True)
-=======
+
                 # FUORI DAL CENTRO: avvisa solo se non è già in corso una manovra di correzione
                 if not correzione_in_corso:
                     correzione_in_corso = True
@@ -463,7 +457,6 @@ def gestisci_macchina_a_stati(errore_x, incrocio_rilevato, cartelli_disponibili,
                     else:
                         invia_voce(f"Attenzione! Stai uscendo dalla linea verso {lato}. Correzione immediata verso destra.", prioritario=True)
                 # Se correzione_in_corso è già True: silenzio, si aspetta il ritrovamento del centro
->>>>>>> 6a80799b1faf03b27c647e48420c431f35bc033f
 
         else:
             # --- LOGICA DI GESTIONE E RI-ALLINEAMENTO LINEA PERSA ---
