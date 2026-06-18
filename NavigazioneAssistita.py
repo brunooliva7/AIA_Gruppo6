@@ -40,7 +40,7 @@ TRADUZIONI_ITA = {
     'umbrella': 'un ombrello', 'suitcase': 'una valigia'
 }
 
-BLU_LOWER = np.array([95, 50, 50])
+BLU_LOWER = np.array([95, 70, 30])
 BLU_UPPER = np.array([135, 255, 255])
 
 # Soglia V minima: pixel con V sotto questa soglia sono troppo scuri
@@ -338,8 +338,6 @@ class AnalizzatoreLinea:
 
         blur = cv2.GaussianBlur(frame, (5, 5), 0)
         hsv  = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
-
-        # Maschera blu (range ampliato per tollerare riflessi a saturazione bassa)
         mask = cv2.inRange(hsv, blu_lower, blu_upper)
 
         # Esclusione ombre: rimuove i pixel troppo scuri (V < soglia) che cadono
