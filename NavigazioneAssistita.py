@@ -5,9 +5,7 @@ import threading
 import time
 import easyocr
 import queue
-import speech_recognition as sr
 from cvlib.object_detection import YOLO
-import winsound
 
 
 # =============================================================================
