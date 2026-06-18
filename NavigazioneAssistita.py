@@ -43,7 +43,6 @@ TRADUZIONI_ITA = {
 BLU_LOWER = np.array([95, 70, 30])
 BLU_UPPER = np.array([135, 255, 255])
 
-<<<<<<< HEAD
 # Soglia minima di saturazione: pixel con S < questo valore sono bianchi/riflessi
 # e vengono esclusi dalla maschera blu anche se l'hue è corretto.
 SATURAZIONE_MIN_LINEA = 55
@@ -58,11 +57,6 @@ AREA_MIN_CONTORNO = 2500
 # Aspect ratio massimo del bounding rect del contorno:
 # un blob molto allungato orizzontalmente è probabile ombra, non linea guida.
 ASPECT_RATIO_MAX = 8.0
-=======
-# Soglia V minima: pixel con V sotto questa soglia sono troppo scuri
-# per essere linea (probabilmente ombra). Tagliati prima della maschera blu.
-V_MIN_LINEA = 60
->>>>>>> c034e840289ff03b67a9df96126d16d3062ed5d8
 
 SOGLIA_MINIMA_PIXEL       = 3000
 SOGLIA_Y_INCROCIO         = 320
@@ -353,7 +347,6 @@ class AnalizzatoreLinea:
         incrocio_rilevato = False
         errore_x = 0
 
-<<<<<<< HEAD
         # --- PREPROCESSING ROBUSTO ALLA LUCE ---
         # 1. Sfocatura per ridurre rumore e riflessi puntuali
         blur = cv2.GaussianBlur(frame, (7, 7), 0)
@@ -390,25 +383,6 @@ class AnalizzatoreLinea:
         k_close = np.ones((11, 11), np.uint8)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k_open)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close)
-=======
-        blur = cv2.GaussianBlur(frame, (5, 5), 0)
-        hsv  = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, blu_lower, blu_upper)
-
-        # Esclusione ombre: rimuove i pixel troppo scuri (V < soglia) che cadono
-        # nel range blu solo perché ombra su pavimento bluastro.
-        V = hsv[:, :, 2]
-        mask_no_ombra = cv2.threshold(V, V_MIN_LINEA, 255, cv2.THRESH_BINARY)[1]
-        mask = cv2.bitwise_and(mask, mask_no_ombra)
-
-        # OPEN piccolo: rimuove rumore puntuale
-        kernel_open = np.ones((5, 5), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)
-
-        # CLOSE: ricuce i buchi della linea dovuti a riflessi
-        kernel_close = np.ones((15, 15), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close)
->>>>>>> c034e840289ff03b67a9df96126d16d3062ed5d8
 
         # --- ESTRAZIONE CONTORNI ---
         contorni, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
