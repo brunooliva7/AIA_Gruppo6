@@ -228,23 +228,53 @@ class RilevatorYOLO:
 
     def disegna_su_frame(self, frame):
         ostacolo_vicino = False
+        altezza_frame = frame.shape[0]  # Ci serve per calcolare quanto un oggetto è vicino al fondo
+
         for i, label in enumerate(self._dati["yolo_labels"]):
             try:
                 x_min, y_min, x_max, y_max = self._dati["yolo_bbox"][i]
-                alt_pixel   = y_max - y_min
+                alt_pixel = y_max - y_min
+                
+                # 1. Calcolo classico basato sulla stima dell'altezza
                 distanza_cm = self.calcola_distanza(ALTEZZE_REALI_CM.get(label, ALTEZZA_DEFAULT), alt_pixel)
+                
+                # 2. CONTROLLO DI SICUREZZA GROUND-PLANE (Piano di appoggio)
+                # Calcoliamo in percentuale quanto il lato inferiore del box è vicino al fondo dello schermo
+                # 1.0 = tocca il fondo esatto dello schermo (vicinissimo)
+                vicinanza_suolo = y_max / altezza_frame 
+                
                 cat = "PERSONA" if label == 'person' else "OGGETTO"
-                if distanza_cm < DISTANZA_ALLARME:
+                
+                # LOGICA DI ALLARME IBRIDA
+                # L'allarme scatta SE l'oggetto è calcolato a meno di 150cm
+                # OPPURE SE la base dell'oggetto occupa l'ultimo 15% inferiore dello schermo (> 0.85)
+                # Questo previene lo scontro con oggetti "tagliati" dall'inquadratura
+                is_allarme = (distanza_cm < DISTANZA_ALLARME) or (vicinanza_suolo > 0.85)
+
+                if is_allarme:
                     ostacolo_vicino = True
-                    cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), (0, 0, 255), 3)
-                    cv2.putText(frame, f"ALLARME {cat} ({distanza_cm/100:.1f}m)",
-                                (x_min, y_min - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                    colore = (0, 0, 255) # Rosso
+                    testo = f"ALLARME {cat} ({distanza_cm/100:.1f}m)"
+                    spessore = 3
                 else:
-                    cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
-                    cv2.putText(frame, f"{cat} ({distanza_cm/100:.1f}m)",
-                                (x_min, y_min - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    colore = (0, 255, 0) # Verde
+                    testo = f"{cat} ({distanza_cm/100:.1f}m)"
+                    spessore = 2
+
+                # Disegna il rettangolo
+                cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), colore, spessore)
+                
+                # Crea uno sfondo nero per il testo per renderlo leggibile
+                (w, h), _ = cv2.getTextSize(testo, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                cv2.rectangle(frame, (x_min, y_min - 20), (x_min + w, y_min), colore, -1)
+                
+                # Scrive il testo sopra l'oggetto
+                cv2.putText(frame, testo, (x_min, y_min - 5), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0) if is_allarme else (255, 255, 255), 2)
+                            
             except IndexError:
                 pass
+                
         return frame, ostacolo_vicino
 
     def descrivi_ambiente(self, frame):
