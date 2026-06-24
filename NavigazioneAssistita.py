@@ -5,6 +5,7 @@ import threading
 import time
 import easyocr
 import queue
+import speech_recognition as sr
 from cvlib.object_detection import YOLO
 
 
@@ -43,9 +44,13 @@ TRADUZIONI_ITA = {
 BLU_LOWER = np.array([95, 70, 30])
 BLU_UPPER = np.array([135, 255, 255])
 
-# Soglia V minima: pixel con V sotto questa soglia sono troppo scuri
-# per essere linea (probabilmente ombra). Tagliati prima della maschera blu.
-V_MIN_LINEA = 60
+# Filtri geometrici per il riconoscimento linea
+# La linea del percorso è allungata (aspect ratio alta) e compatta (solidità alta).
+# Questi valori scartano oggetti blu compatti (mobili, abiti) e ombre frammentate.
+LINEA_ASPECT_RATIO_MIN = 1.5    # larghezza/altezza o altezza/larghezza minima del bounding box
+LINEA_SOLIDITA_MIN     = 0.25   # area contorno / area convex hull (ombre = bassa solidità)
+LINEA_SATURAZIONE_MIN  = 60     # saturazione HSV minima: le ombre hanno S bassa, il blu vero no
+LINEA_Y_MIN_FRAZIONE   = 0.20   # la linea deve iniziare almeno al 20% dall'alto del frame
 
 SOGLIA_MINIMA_PIXEL       = 3000
 SOGLIA_Y_INCROCIO         = 320
@@ -330,6 +335,57 @@ class AnalizzatoreLinea:
     def diramazione_vista_prima(self, val):
         self._diramazione_vista_prima = val
 
+    @staticmethod
+    def _contorno_e_linea(contorno, hsv, altezza_frame):
+        """
+        Restituisce True solo se il contorno supera tutti i filtri anti-falso-positivo:
+
+        1. Area minima — scarta pixel sparsi e rumore
+        2. Aspect ratio — la linea è allungata, non quadrata come un oggetto blu generico
+        3. Solidità — area / convex_hull: ombre e riflessi sono frammentati (solidità bassa)
+        4. Posizione Y — la linea è a terra, non in alto nel frame (es. cielo, pareti)
+        5. Saturazione media HSV — le ombre hanno S bassa, un nastro blu vero ha S alta
+        """
+        area = cv2.contourArea(contorno)
+        if area < 1500:
+            return False
+
+        x, y, w, h = cv2.boundingRect(contorno)
+
+        # 1. Aspect ratio: almeno 1.5:1 in una delle due direzioni
+        if w == 0 or h == 0:
+            return False
+        ratio = max(w / h, h / w)
+        if ratio < LINEA_ASPECT_RATIO_MIN:
+            return False
+
+        # 2. Solidità: area reale vs area del convex hull
+        hull = cv2.convexHull(contorno)
+        area_hull = cv2.contourArea(hull)
+        if area_hull == 0:
+            return False
+        solidita = area / area_hull
+        if solidita < LINEA_SOLIDITA_MIN:
+            return False
+
+        # 3. Posizione Y: il baricentro non deve essere troppo in alto nel frame
+        M = cv2.moments(contorno)
+        if M["m00"] == 0:
+            return False
+        cy = int(M["m01"] / M["m00"])
+        if cy < altezza_frame * LINEA_Y_MIN_FRAZIONE:
+            return False
+
+        # 4. Saturazione media nella regione del contorno:
+        #    crea una maschera locale e leggi la saturazione media in HSV
+        maschera_locale = np.zeros(hsv.shape[:2], dtype=np.uint8)
+        cv2.drawContours(maschera_locale, [contorno], -1, 255, -1)
+        saturazione_media = cv2.mean(hsv[:, :, 1], mask=maschera_locale)[0]
+        if saturazione_media < LINEA_SATURAZIONE_MIN:
+            return False
+
+        return True
+
     def elabora(self, frame, blu_lower, blu_upper):
         altezza, larghezza, _ = frame.shape
         centro_camera = larghezza // 2
@@ -340,34 +396,19 @@ class AnalizzatoreLinea:
         hsv  = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, blu_lower, blu_upper)
 
-        # Esclusione ombre: rimuove i pixel troppo scuri (V < soglia) che cadono
-        # nel range blu solo perché ombra su pavimento bluastro.
-        V = hsv[:, :, 2]
-        mask_no_ombra = cv2.threshold(V, V_MIN_LINEA, 255, cv2.THRESH_BINARY)[1]
-        mask = cv2.bitwise_and(mask, mask_no_ombra)
+        # MORPH_OPEN rimuove il rumore puntuale;
+        # MORPH_CLOSE chiude i buchi causati da riflessi e variazioni di illuminazione
+        kernel = np.ones((5, 5), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
-        # OPEN piccolo: rimuove rumore puntuale
-        kernel_open = np.ones((5, 5), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)
-
-        # CLOSE: ricuce i buchi della linea dovuti a riflessi
-        kernel_close = np.ones((15, 15), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close)
-
-        # --- ESTRAZIONE CONTORNI ---
         contorni, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        contorni_validi = []
-        for c in contorni:
-            area = cv2.contourArea(c)
-            if area < V_MIN_LINEA:
-                continue
-            # Filtro aspect ratio: scarta blob eccessivamente piatti (ombre orizzontali)
-            x, y, w, h = cv2.boundingRect(c)
-            ratio = w / h if h > 0 else 999
-            if ratio > V_MIN_LINEA:
-                continue
-            contorni_validi.append(c)
+        # Applica tutti i filtri geometrici e di saturazione
+        contorni_validi = [
+            c for c in contorni
+            if self._contorno_e_linea(c, hsv, altezza)
+        ]
 
         if len(contorni_validi) >= 2:
             aree = sorted([cv2.contourArea(c) for c in contorni_validi], reverse=True)
@@ -376,7 +417,14 @@ class AnalizzatoreLinea:
                 self._diramazione_vista_prima = True
 
         if len(contorni_validi) > 0:
-            contorno_maggiore = max(contorni_validi, key=cv2.contourArea)
+            # Selezione intelligente del contorno tramite lambda function inline
+            if self._ultima_x_valida is not None:
+                # Ordina per vicinanza all'ultima posizione nota calcolando il baricentro al volo
+                contorno_maggiore = min(contorni_validi,  key=lambda c: int(cv2.moments(c)["m10"] / cv2.moments(c)["m00"]) if cv2.moments(c)["m00"] > 0 else float('inf'))
+            else:
+                # Fallback se non c'è un centro precedente: prendi il più grande
+                contorno_maggiore = max(contorni_validi, key=cv2.contourArea)
+
             moments = cv2.moments(contorno_maggiore)
             if moments["m00"] > 0:
                 cx = int(moments["m10"] / moments["m00"])
@@ -475,7 +523,7 @@ class MacchinaStati:
         elif errore_x is not None:
             self._fase_recupero = 0
             abs_err = abs(errore_x)
-            lato = "destra" if errore_x < 0 else "sinistra"
+            lato = "destra" if errore_x > 0 else "sinistra"
             if abs_err <= TOLLERANZA_OK:
                 if self._correzione_in_corso:
                     self._correzione_in_corso = False
@@ -519,7 +567,7 @@ class MacchinaStati:
             if dir_recupero:
                 self._voce.parla(
                     f"Attenzione, linea persa. L'ultima posizione era a {dir_recupero} del tuo campo visivo. "
-                    f"Fermati e ruota lentamente verso {dir_recupero}.", prioritario=True)
+                    f"Fermati e ruota lentamente verso {dir_opposta}.", prioritario=True)
             else:
                 self._voce.parla("Attenzione, linea persa. Fermati e ruota lentamente cercando la linea.", prioritario=True)
             print(f"[RECUPERO FASE 1] contatore={cnt}")
@@ -573,7 +621,7 @@ class MacchinaStati:
                     break
 
     def _stato_svolta(self):
-        durata = 4.5 if self._direzione_da_prendere in ["DESTRA", "SINISTRA"] else 2.5
+        durata = 2.5 if self._direzione_da_prendere in ["DESTRA", "SINISTRA"] else 1.5
         if time.time() - self._tempo_inizio_svolta > durata:
             self._voce.parla("Manovra completata. Riprendo l'assistenza sul percorso lineare.", prioritario=True)
             self._dati["ocr_cartelli"] = {}
@@ -586,7 +634,7 @@ class MacchinaStati:
 # =============================================================================
 # GestoreMonitoraggio — Gestisce la modalità di descrizione ambientale YOLO
 # attivabile con W/S da tastiera. In questa modalità la macchina a stati è
-# sospesa e ogni 7 secondi viene letto l'ambiente circostante.
+# sospesa e ogni 4 secondi viene letto l'ambiente circostante.
 # =============================================================================
 
 class GestoreMonitoraggio:
@@ -602,7 +650,7 @@ class GestoreMonitoraggio:
         if not self.attivo:
             return
         now = time.time()
-        if now - self._ultimo_annuncio > 7.0:
+        if now - self._ultimo_annuncio > 4.0:
             descrizione = self._yolo.descrivi_ambiente(frame)
             if descrizione:
                 self._voce.parla(descrizione, prioritario=True)
@@ -617,13 +665,15 @@ class GestoreMonitoraggio:
             if not self.attivo:
                 self.attivo = True
                 self._ultimo_annuncio = 0
-                self._voce.parla("Monitoraggio ambientale attivato. Metti il telefono parallelo al petto.", prioritario=True)
                 print("[SISTEMA] Monitoraggio Ambientale Continuo: ACCESO")
+                self._voce.parla("Monitoraggio ambientale attivato. Metti il telefono parallelo al petto.", prioritario=True)
+                self._voce.semaforo.wait()
         elif tasto == ord('s') or tasto == ord('S'):
             if self.attivo:
                 self.attivo = False
-                self._voce.parla("Monitoraggio ambientale disattivato. Metti il telefono parallelo al pavimento. Torno alla navigazione.", prioritario=True)
                 print("[SISTEMA] Monitoraggio Ambientale Continuo: SPENTO")
+                self._voce.parla("Monitoraggio ambientale disattivato. Metti il telefono parallelo al pavimento. Torno alla navigazione.", prioritario=True)
+                self._voce.semaforo.wait()
 
 
 # =============================================================================
@@ -634,12 +684,19 @@ class GestoreMonitoraggio:
 class OverlayGrafico:
 
     def applica(self, frame, macchina: MacchinaStati, monitoraggio_attivo: bool):
+        y = 30  # posizione Y della prima riga
+        riga_h = 35  # spazio verticale tra le righe
+
         if monitoraggio_attivo:
-            cv2.putText(frame, "STATO ASSISTENTE: ASCOLTO VOCALE", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
+            cv2.putText(frame, "STATO ASSISTENTE: ASCOLTO VOCALE",
+                        (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
         else:
-            cv2.putText(frame, f"STATO ASSISTENTE: {macchina.stato}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
+            cv2.putText(frame, f"STATO ASSISTENTE: {macchina.stato}",
+                        (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
         if macchina.stato == STATO_SVOLTA_AUTOMATICA and macchina.direzione_da_prendere:
-            cv2.putText(frame, f"GUIDA ALLA MANOVRA: {macchina.direzione_da_prendere}", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            y += riga_h
+            cv2.putText(frame, f"GUIDA ALLA MANOVRA: {macchina.direzione_da_prendere}",
+                        (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
         return frame
 
 
@@ -703,7 +760,6 @@ def main():
         if monitoraggio.attivo:
             monitoraggio.aggiorna(frame, macchina)
 
-        dati_condivisi["frame_da_analizzare"] = frame.copy()
         cartelli_disponibili = dati_condivisi["ocr_cartelli"].copy()
 
         frame_linee, maschera_linee, incrocio_rilevato, errore_x = analizzatore.elabora(
@@ -722,9 +778,6 @@ def main():
         frame_finale = overlay.applica(frame_linee, macchina, monitoraggio.attivo)
         cv2.imshow("Maschera", maschera_linee)
         cv2.imshow("Navigation System", frame_finale)
-
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
 
     dati_condivisi["running"] = False
     video.release()
