@@ -690,7 +690,7 @@ class GestoreMonitoraggio:
         if not self.attivo:
             return
         now = time.time()
-        if now - self._ultimo_annuncio > 7.0:
+        if now - self._ultimo_annuncio > 4.0:
             descrizione = self._yolo.descrivi_ambiente(frame)
             if descrizione:
                 self._voce.parla(descrizione, interrompi_subito=True)
