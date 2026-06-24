@@ -7,6 +7,7 @@ import easyocr
 import queue
 import speech_recognition as sr
 from cvlib.object_detection import YOLO
+import winsound  # Riconoscimento audio e feedback acustici di sistema
 
 
 # =============================================================================
@@ -63,7 +64,7 @@ TOLLERANZA_MEDIA = 130
 TOLLERANZA_FORTE = 210
 SMOOTHING_BUFFER_SIZE = 5
 
-INTERVALLO_VOCE = 1.8
+INTERVALLO_VOCE = 2.2
 
 STATO_NAVIGAZIONE       = "NAVIGAZIONE"
 STATO_INCROCIO_ATTESA   = "INCROCIO_ATTESA"
@@ -72,48 +73,69 @@ STATO_LINEA_PERSA       = "LINEA_PERSA"
 
 
 # =============================================================================
-# MotoreVocale — Gestisce la sintesi vocale TTS tramite SAPI in un thread
-# dedicato. Supporta messaggi normali, prioritari (svuotano la coda) e
-# interruzione immediata via SpVoice.Skip().
+# MotoreVocale — Gestisce la sintesi vocale TTS inviando i messaggi via HTTP
+# al server web locale (SitoWebDialogoVoice.py), che li riproduce sul telefono.
+#
+# Rispetto alla versione SAPI:
+#   • interrompi_subito=True  → invia taglia_audio al telefono per tagliare
+#     l'audio in corso e usare interruzione_voce per uscire subito dal wait
+#   • overflow protection     → se la coda supera 2 msg, la svuota e tiene solo l'ultimo
+#   • thread_polling_comandi  → thread separato che legge comandi W/S/Q dal server
+#     web e li espone tramite la property comando_remoto per il loop principale
 # =============================================================================
 
 class MotoreVocale:
 
+    TTS_URL     = "http://127.0.0.1:5000/api/invia-messaggio"
+    POLLING_URL = "http://127.0.0.1:5000/api/leggi-comando"
+
     def __init__(self, dati_condivisi):
-        self._dati           = dati_condivisi
-        self._coda           = queue.Queue()
-        self._semaforo       = threading.Event()
+        self._dati              = dati_condivisi
+        self._coda              = queue.Queue()
+        self._semaforo          = threading.Event()
         self._semaforo.set()
-        self._sapi           = None
-        self._lock           = threading.Lock()
-        self._flag_interrompi = threading.Event()
-        self._ultimo_msg     = ""
-        self._ultimo_tempo   = 0.0
+        self._interruzione_voce = threading.Event()   # sveglia il wait del TTS immediatamente
+        self._ultimo_msg        = ""
+        self._ultimo_tempo      = 0.0
+        self._comando_remoto    = None                # ultimo comando ricevuto dal telefono
 
     def avvia(self):
-        threading.Thread(target=self._loop_tts, daemon=True).start()
+        threading.Thread(target=self._loop_tts,     daemon=True).start()
+        threading.Thread(target=self._loop_polling,  daemon=True).start()
 
+    # ------------------------------------------------------------------
+    # Thread TTS: invia i testi al server web e simula la durata di lettura
+    # ------------------------------------------------------------------
     def _loop_tts(self):
-        import pythoncom
-        import win32com.client
-        pythoncom.CoInitialize()
-        with self._lock:
-            self._sapi = win32com.client.Dispatch("SAPI.SpVoice")
-            self._sapi.Rate = 1
-        print("[THREAD VOCE UNIFICATO] Pronto.")
+        import requests
+        print("[THREAD VOCE UNIFICATO] Pronto (invia i messaggi al server web).")
         while self._dati["running"]:
             try:
-                testo = self._coda.get(timeout=0.5)
-                if self._flag_interrompi.is_set():
-                    self._flag_interrompi.clear()
-                    self._coda.task_done()
-                    continue
-                self._semaforo.clear()
-                print(f"\n>>> [SISTEMA PARLA]: {testo} <<<\n")
-                self._flag_interrompi.clear()
-                with self._lock:
-                    self._sapi.Speak(testo, 0)
-                self._semaforo.set()
+                elemento = self._coda.get(timeout=0.5)
+                # L'elemento è sempre una tupla (testo, taglia_audio)
+                if isinstance(elemento, tuple):
+                    testo, taglia_audio = elemento
+                else:
+                    testo, taglia_audio = elemento, False
+
+                self._semaforo.clear()   # Rosso: il robot sta parlando
+                print(f"\n>>> [INVIATO AL TELEFONO]: {testo} <<<\n")
+
+                try:
+                    requests.post(
+                        self.TTS_URL,
+                        json={"testo": testo, "taglia_audio": taglia_audio},
+                        timeout=2
+                    )
+                    # Simula il tempo di pronuncia (~1 sec ogni 10 caratteri).
+                    # interruzione_voce permette di uscire subito se arriva un msg prioritario.
+                    tempo_lettura = max(1.0, len(testo) / 10.0)
+                    self._interruzione_voce.wait(timeout=tempo_lettura)
+                    self._interruzione_voce.clear()
+                except Exception as e:
+                    print(f"[ERRORE] Invio messaggio al web fallito: {e}")
+
+                self._semaforo.set()     # Verde: il telefono ha finito
                 self._coda.task_done()
             except queue.Empty:
                 continue
@@ -121,14 +143,68 @@ class MotoreVocale:
                 print(f"[ERRORE AUDIO] {e}")
                 self._semaforo.set()
 
-    def _stop_ora(self):
-        self._flag_interrompi.set()
-        with self._lock:
-            if self._sapi is not None:
-                try:
-                    self._sapi.Skip("Sentence", 999)
-                except Exception:
-                    pass
+    # ------------------------------------------------------------------
+    # Thread polling: legge comandi W/S/Q inviati dall'interfaccia web
+    # ------------------------------------------------------------------
+    def _loop_polling(self):
+        import requests
+        print("[THREAD POLLING] In ascolto di comandi dall'interfaccia web...")
+        while self._dati["running"]:
+            try:
+                r = requests.get(self.POLLING_URL, timeout=1)
+                if r.status_code == 200:
+                    cmd = r.json().get("comando")
+                    if cmd:
+                        self._comando_remoto = cmd
+            except Exception:
+                pass
+            time.sleep(0.05)
+
+    # ------------------------------------------------------------------
+    # API pubblica
+    # ------------------------------------------------------------------
+    def parla(self, testo, prioritario=False, interrompi_subito=False):
+        """
+        interrompi_subito=True  → interrompe subito l'audio in corso sul telefono
+                                   e svuota la coda (sostituisce il vecchio interrompi=True)
+        prioritario=True        → svuota la coda senza interrompere l'audio corrente
+        (default)               → messaggio normale con anti-spam (INTERVALLO_VOCE)
+        """
+        now = time.time()
+
+        if interrompi_subito:
+            self._interruzione_voce.set()          # sveglia il wait del TTS immediatamente
+            self._svuota_coda_interna()
+            self._coda.put((testo, True))          # taglia_audio=True → il telefono taglia l'audio
+            self._ultimo_msg   = ""
+            self._ultimo_tempo = 0.0
+
+        elif prioritario:
+            self._svuota_coda_interna()
+            self._semaforo.clear()
+            self._coda.put((testo, False))
+            self._ultimo_msg   = ""
+            self._ultimo_tempo = 0.0
+
+        else:
+            if testo != self._ultimo_msg or (now - self._ultimo_tempo) > INTERVALLO_VOCE:
+                self._semaforo.clear()
+
+                # Overflow protection: se la coda ha più di 2 messaggi,
+                # svuotala e tieni solo l'ultimo (evita messaggi di navigazione obsoleti)
+                if self._coda.qsize() > 2:
+                    self._svuota_coda_interna()
+                    self._coda.put((testo, True))   # taglia_audio=True: segnala overflow
+                else:
+                    self._coda.put((testo, False))
+
+                self._ultimo_msg   = testo
+                self._ultimo_tempo = now
+
+    def svuota_coda(self):
+        self._svuota_coda_interna()
+
+    def _svuota_coda_interna(self):
         while not self._coda.empty():
             try:
                 self._coda.get_nowait()
@@ -137,43 +213,16 @@ class MotoreVocale:
                 break
         self._semaforo.set()
 
-    def parla(self, testo, prioritario=False, interrompi=False):
-        now = time.time()
-        if interrompi:
-            self._stop_ora()
-            self._flag_interrompi.clear()
-            self._coda.put(testo)
-            self._ultimo_msg   = ""
-            self._ultimo_tempo = 0.0
-        elif prioritario:
-            while not self._coda.empty():
-                try:
-                    self._coda.get_nowait()
-                    self._coda.task_done()
-                except queue.Empty:
-                    break
-            self._semaforo.clear()
-            self._coda.put(testo)
-            self._ultimo_msg   = ""
-            self._ultimo_tempo = 0.0
-        else:
-            if testo != self._ultimo_msg or (now - self._ultimo_tempo) > INTERVALLO_VOCE:
-                self._semaforo.clear()
-                self._coda.put(testo)
-                self._ultimo_msg   = testo
-                self._ultimo_tempo = now
-
-    def svuota_coda(self):
-        while not self._coda.empty():
-            try:
-                self._coda.get_nowait()
-                self._coda.task_done()
-            except queue.Empty:
-                break
-
     @property
     def semaforo(self):
         return self._semaforo
+
+    @property
+    def comando_remoto(self):
+        """Restituisce e consuma l'ultimo comando ricevuto dal telefono (W/S/Q)."""
+        cmd = self._comando_remoto
+        self._comando_remoto = None
+        return cmd
 
 
 # =============================================================================
@@ -650,30 +699,46 @@ class GestoreMonitoraggio:
         if not self.attivo:
             return
         now = time.time()
-        if now - self._ultimo_annuncio > 4.0:
+        if now - self._ultimo_annuncio > 7.0:
             descrizione = self._yolo.descrivi_ambiente(frame)
             if descrizione:
-                self._voce.parla(descrizione, prioritario=True)
+                # interrompi_subito=True: taglia l'audio in corso sul telefono
+                # e invia la descrizione ambientale immediatamente
+                self._voce.parla(descrizione, interrompi_subito=True)
+            # Pausa breve per dare al thread TTS il tempo di far scattare il semaforo rosso
+            time.sleep(0.1)
             self._voce.semaforo.wait()
-            self._ultimo_annuncio = now
+            self._ultimo_annuncio = time.time()
 
         macchina.stato = STATO_NAVIGAZIONE
         self._voce.svuota_coda()
 
-    def gestisci_tasto(self, tasto):
+    def gestisci_tasto(self, tasto, da_voce=False):
+        """
+        Gestisce W/S da tastiera o da comando vocale remoto (da_voce=True).
+        Con da_voce=True usa interrompi_subito per tagliare subito l'audio in corso.
+        """
         if tasto == ord('w') or tasto == ord('W'):
             if not self.attivo:
                 self.attivo = True
                 self._ultimo_annuncio = 0
+                self._voce.parla(
+                    "Monitoraggio ambientale attivato. Metti il telefono parallelo al petto.",
+                    interrompi_subito=da_voce,
+                    prioritario=not da_voce
+                )
+                self._voce.semaforo.wait()   # aspetta che finisca la frase di attivazione
                 print("[SISTEMA] Monitoraggio Ambientale Continuo: ACCESO")
-                self._voce.parla("Monitoraggio ambientale attivato. Metti il telefono parallelo al petto.", prioritario=True)
-                self._voce.semaforo.wait()
         elif tasto == ord('s') or tasto == ord('S'):
             if self.attivo:
                 self.attivo = False
+                self._voce.parla(
+                    "Monitoraggio ambientale disattivato. Metti il telefono parallelo al pavimento. Torno alla navigazione.",
+                    interrompi_subito=da_voce,
+                    prioritario=not da_voce
+                )
+                self._voce.semaforo.wait()   # aspetta che finisca la frase di disattivazione
                 print("[SISTEMA] Monitoraggio Ambientale Continuo: SPENTO")
-                self._voce.parla("Monitoraggio ambientale disattivato. Metti il telefono parallelo al pavimento. Torno alla navigazione.", prioritario=True)
-                self._voce.semaforo.wait()
 
 
 # =============================================================================
@@ -770,7 +835,25 @@ def main():
             macchina.aggiorna(errore_x, incrocio_rilevato, cartelli_disponibili, larghezza=frame.shape[1])
 
         tasto = cv2.waitKey(1) & 0xFF
-        monitoraggio.gestisci_tasto(tasto)
+
+        # Controlla se è arrivato un comando remoto dal telefono (W/S/Q via voce).
+        # Il comando sovrascrive il tasto fisico e attiva interrompi_subito.
+        da_voce = False
+        cmd = voce.comando_remoto
+        if cmd:
+            if cmd in ['W', 'W_VOICE']:
+                tasto = ord('w')
+                da_voce = True
+            elif cmd in ['S', 'S_VOICE']:
+                tasto = ord('s')
+                da_voce = True
+            elif cmd in ['Q', 'Q_VOICE']:
+                tasto = ord('q')
+                da_voce = True
+            if da_voce:
+                voce.svuota_coda()   # svuota i vecchi messaggi di navigazione
+
+        monitoraggio.gestisci_tasto(tasto, da_voce=da_voce)
 
         if tasto == ord('q'):
             break
