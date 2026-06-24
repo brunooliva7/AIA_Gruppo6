@@ -198,11 +198,19 @@ class MotoreVocale:
 # RilevatorYOLO — Esegue il rilevamento ostacoli in un thread dedicato.
 # =============================================================================
 
+# =============================================================================
+# RilevatorYOLO — Esegue il rilevamento ostacoli in un thread dedicato.
+# Include la doppia stima della distanza (Focale + Ground Plane)
+# =============================================================================
+
 class RilevatorYOLO:
 
     def __init__(self, dati_condivisi, yolo_model):
         self._dati  = dati_condivisi
         self._model = yolo_model
+        
+        # ALTEZZA A CUI È POSIZIONATA LA TELECAMERA SULL'UTENTE (Modifica se serve)
+        self.ALTEZZA_TELEFONO_CM = 130 
 
     def avvia(self):
         threading.Thread(target=self._loop, daemon=True).start()
@@ -221,87 +229,98 @@ class RilevatorYOLO:
             time.sleep(0.01)
 
     @staticmethod
-    def calcola_distanza(altezza_reale_cm, altezza_pixel):
-        if altezza_pixel == 0:
-            return 0
+    def calcola_distanza_altezza(altezza_reale_cm, altezza_pixel):
+        """Metodo 1: Basato sull'altezza ipotetica dell'oggetto (Vostro metodo originale)"""
+        if altezza_pixel <= 0: return float('inf')
         return (altezza_reale_cm * FOCAL_LENGTH) / altezza_pixel
+
+    def calcola_distanza_suolo(self, y_max, altezza_frame):
+        """Metodo 2: Basato sul punto in cui l'oggetto tocca il pavimento (Ground Plane)"""
+        centro_y = altezza_frame / 2
+        # Se la base dell'oggetto è nella metà superiore dello schermo, è all'orizzonte o sospeso
+        if y_max <= centro_y:
+            return float('inf')
+        
+        # Formula della prospettiva
+        return (self.ALTEZZA_TELEFONO_CM * FOCAL_LENGTH) / (y_max - centro_y)
+
+    def stima_distanza_migliore(self, label, y_min, y_max, altezza_frame):
+        """Combina i due metodi per avere sempre la distanza in cm più sicura"""
+        alt_pixel = y_max - y_min
+        
+        # Calcola entrambe le distanze
+        dist_altezza = self.calcola_distanza_altezza(ALTEZZE_REALI_CM.get(label, ALTEZZA_DEFAULT), alt_pixel)
+        dist_suolo = self.calcola_distanza_suolo(y_max, altezza_frame)
+        
+        # Restituisce la distanza MINORE (se un metodo sbaglia sovrastimando, l'altro ci salva)
+        return min(dist_altezza, dist_suolo)
 
     def disegna_su_frame(self, frame):
         ostacolo_vicino = False
-        altezza_frame = frame.shape[0]  # Ci serve per calcolare quanto un oggetto è vicino al fondo
+        altezza_frame = frame.shape[0]
 
         for i, label in enumerate(self._dati["yolo_labels"]):
             try:
                 x_min, y_min, x_max, y_max = self._dati["yolo_bbox"][i]
-                alt_pixel = y_max - y_min
                 
-                # 1. Calcolo classico basato sulla stima dell'altezza
-                distanza_cm = self.calcola_distanza(ALTEZZE_REALI_CM.get(label, ALTEZZA_DEFAULT), alt_pixel)
-                
-                # 2. CONTROLLO DI SICUREZZA GROUND-PLANE (Piano di appoggio)
-                # Calcoliamo in percentuale quanto il lato inferiore del box è vicino al fondo dello schermo
-                # 1.0 = tocca il fondo esatto dello schermo (vicinissimo)
-                vicinanza_suolo = y_max / altezza_frame 
+                # Calcola la distanza reale ottimizzata
+                distanza_cm = self.stima_distanza_migliore(label, y_min, y_max, altezza_frame)
                 
                 cat = "PERSONA" if label == 'person' else "OGGETTO"
-                
-                # LOGICA DI ALLARME IBRIDA
-                # L'allarme scatta SE l'oggetto è calcolato a meno di 150cm
-                # OPPURE SE la base dell'oggetto occupa l'ultimo 15% inferiore dello schermo (> 0.85)
-                # Questo previene lo scontro con oggetti "tagliati" dall'inquadratura
-                is_allarme = (distanza_cm < DISTANZA_ALLARME) or (vicinanza_suolo > 0.85)
-
-                if is_allarme:
+                if distanza_cm < DISTANZA_ALLARME:
                     ostacolo_vicino = True
-                    colore = (0, 0, 255) # Rosso
-                    testo = f"ALLARME {cat} ({distanza_cm/100:.1f}m)"
-                    spessore = 3
+                    cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), (0, 0, 255), 3)
+                    cv2.putText(frame, f"ALLARME {cat} ({distanza_cm/100:.1f}m)",
+                                (x_min, y_min - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                 else:
-                    colore = (0, 255, 0) # Verde
-                    testo = f"{cat} ({distanza_cm/100:.1f}m)"
-                    spessore = 2
-
-                # Disegna il rettangolo
-                cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), colore, spessore)
-                
-                # Crea uno sfondo nero per il testo per renderlo leggibile
-                (w, h), _ = cv2.getTextSize(testo, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-                cv2.rectangle(frame, (x_min, y_min - 20), (x_min + w, y_min), colore, -1)
-                
-                # Scrive il testo sopra l'oggetto
-                cv2.putText(frame, testo, (x_min, y_min - 5), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0) if is_allarme else (255, 255, 255), 2)
-                            
+                    cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
+                    if distanza_cm != float('inf'):
+                        cv2.putText(frame, f"{cat} ({distanza_cm/100:.1f}m)",
+                                    (x_min, y_min - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             except IndexError:
                 pass
-                
         return frame, ostacolo_vicino
 
     def descrivi_ambiente(self, frame):
+        """Questa funzione genera la stringa che verrà letta vocalmente dal telefono"""
         labels_viste = list(self._dati.get("yolo_labels", []))
         bbox_visti   = list(self._dati.get("yolo_bbox", []))
+        altezza_frame = frame.shape[0]
+
         if not labels_viste:
             print("[AMBIENTE] Nessun oggetto rilevato nei thread di background...")
             return None
+            
         oggetti_descritti = []
         for i, label in enumerate(labels_viste):
             try:
                 x_min, y_min, x_max, y_max = bbox_visti[i]
-                alt_pixel   = y_max - y_min
-                distanza_cm = self.calcola_distanza(ALTEZZE_REALI_CM.get(label, ALTEZZA_DEFAULT), alt_pixel)
+                
+                # USA LA DISTANZA OTTIMIZZATA ANCHE PER LA VOCE
+                distanza_cm = self.stima_distanza_migliore(label, y_min, y_max, altezza_frame)
                 distanza_m  = distanza_cm / 100.0
+                
                 centro_x    = (x_min + x_max) / 2
                 larghezza_f = frame.shape[1]
+                
                 if centro_x < larghezza_f / 3:
                     lato = "alla tua sinistra"
                 elif centro_x > larghezza_f * 2 / 3:
                     lato = "alla tua destra"
                 else:
                     lato = "davanti a te"
+                    
                 nome_ita = TRADUZIONI_ITA.get(label, f"un oggetto ({label})")
-                oggetti_descritti.append(f"{nome_ita} {lato}, a circa {distanza_m:.1f} metri")
+                
+                # Costruisce la frase da leggere ad alta voce
+                if distanza_cm != float('inf'):
+                    oggetti_descritti.append(f"{nome_ita} {lato}, a circa {distanza_m:.1f} metri")
+                else:
+                    oggetti_descritti.append(f"{nome_ita} {lato} in lontananza")
+                    
             except (IndexError, Exception):
                 pass
+                
         if oggetti_descritti:
             return "Nell'ambiente rilevo: " + "; ".join(oggetti_descritti) + "."
         return "Non riesco a stimare la distanza degli oggetti rilevati."
