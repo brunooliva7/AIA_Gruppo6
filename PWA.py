@@ -38,53 +38,123 @@ HTML_PAGE = """
 <!DOCTYPE html>
 <html lang="it">
 <head>
+    <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Centro di Controllo Assistenza</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TrackBuddy - Centro di Controllo</title>
     
     <link rel="manifest" href="/manifest.json">
+    
+    <link rel="icon" href="/static/Icon.png?v=2" type="image/png">
+    <link rel="apple-touch-icon" href="/static/Icon.png?v=2">
+    
     <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="black">
-    <meta name="apple-mobile-web-app-title" content="NavAssist">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="apple-mobile-web-app-title" content="TrackBuddy">
     
     <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: 20px auto; text-align: center; background-color: #121212; color: #ffffff; }
-        button { padding: 15px 20px; font-size: 18px; margin: 10px; cursor: pointer; border: none; border-radius: 8px; font-weight: bold; transition: opacity 0.2s; width: 90%; max-width: 400px; }
+        :root {
+            --bg-light: #f8f9fa; /* Grigio chiarissimo per evitare l'abbagliamento */
+            --text-dark: #2d3436; /* Grigio scuro per il testo, alto contrasto */
+            --focus-ring: #0984e3; /* Blu elettrico per il contorno della tastiera */
+        }
+        
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            max-width: 40rem; /* Dimensioni in rem per scalabilità */
+            margin: 1.5rem auto; 
+            text-align: center; 
+            background-color: var(--bg-light); 
+            color: var(--text-dark); 
+            font-size: 1.125rem; 
+            line-height: 1.6;
+        }
+        
+        button { 
+            padding: 1rem 1.5rem; 
+            font-size: 1.25rem; 
+            margin: 0.75rem; 
+            cursor: pointer; 
+            border: 2px solid transparent; 
+            border-radius: 0.5rem; 
+            font-weight: bold; 
+            transition: opacity 0.2s; 
+            width: 90%; 
+            max-width: 25rem; 
+        }
+        
+        /* Outline per navigazione da tastiera / accessibilità motoria */
+        button:focus-visible {
+            outline: 4px solid var(--focus-ring);
+            outline-offset: 4px;
+        }
+        
         button:hover { opacity: 0.8; }
         
-        #btnRecord { background-color: #ff4757; color: white; }
-        #btnRecord:disabled { background-color: #ff475780; cursor: not-allowed; }
-        #btnStop { background-color: #2ed573; color: white; display: none; }
-        #btnQuit { background-color: #747d8c; color: white; margin-top: 30px; }
+        /* Colori ricalibrati per contrasto con testo bianco (Livello AAA) */
+        #btnRecord { background-color: #d63031; color: white; border: 2px solid #d63031; }
+        #btnRecord:disabled { background-color: #ff7675; cursor: not-allowed; border-color: transparent; color: #fdfdfd; }
+        #btnStop { background-color: #00b894; color: white; border: 2px solid #00b894; display: none; } 
+        #btnQuit { background-color: #636e72; color: white; margin-top: 2rem; border: 2px solid #636e72; }
         
-        #status { font-size: 1.2em; margin: 20px 0; color: #a4b0be; }
-        #result { background-color: #1e272e; padding: 20px; border-radius: 10px; text-align: left; margin-top: 20px; display: none; }
-        .highlight { color: #2ed573; font-weight: bold; }
+        #status { font-size: 1.25rem; margin: 1.5rem 0; color: #2d3436; font-weight: 700; }
         
-        hr { border-color: #2f3542; margin: 30px 0; }
+        #result { 
+            background-color: #ffffff; 
+            padding: 1.5rem; 
+            border-radius: 0.75rem; 
+            text-align: left; 
+            margin-top: 1.5rem; 
+            display: none; 
+            border: 2px solid #b2bec3; 
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+        }
+        
+        .highlight { color: #00b894; font-weight: bold; }
+        
+        #webcam { 
+            width: 95%; 
+            max-width: 26rem; 
+            border-radius: 0.75rem; 
+            background-color: #000; 
+            margin-bottom: 1rem; 
+            border: 3px solid #636e72; 
+        }
+        
+        hr { border-color: #dfe6e9; margin: 2rem 0; }
     </style>
 </head>
 <body>
-    <div id="initOverlay" style="position: fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.9); z-index:9999; display:flex; flex-direction:column; justify-content:center; align-items:center;">
-        <h2>Benvenuto nell'Assistente</h2>
-        <p>Premi il pulsante per abilitare Fotocamera, Microfono e Voce.</p>
-        <button id="btnInit" style="background-color: #2ed573; color: white; padding: 20px 40px; font-size: 24px;">Inizia</button>
+    <div id="initOverlay" role="dialog" aria-labelledby="overlayTitle" aria-describedby="overlayDesc" style="position: fixed; top:0; left:0; width:100%; height:100%; background:rgba(248, 249, 250, 0.98); z-index:9999; display:flex; flex-direction:column; justify-content:center; align-items:center;">
+        <h2 id="overlayTitle" style="color: #2d3436;">Benvenuto nell'Assistente</h2>
+        <p id="overlayDesc" style="font-size: 1.2rem; padding: 0 2rem; color: #2d3436;">Premi il pulsante per abilitare Fotocamera, Microfono e Voce.</p>
+        <button id="btnInit" style="background-color: #00b894; color: white; padding: 1.5rem 2.5rem; font-size: 1.5rem; border: none; font-weight: 800;">Inizia</button>
     </div>
 
-    <h1>Centro di Controllo</h1>
-    <p>Interfaccia Telecomando Web (PWA)</p>
-    
-    <video id="webcam" autoplay playsinline muted style="width: 95%; max-width: 420px; border-radius: 12px; background-color: #000; margin-bottom: 15px; border: 2px solid #2f3542;"></video>
-    <canvas id="hiddenCanvas" style="display: none;"></canvas>
-    
-    <button id="btnRecord">🔴 Parla con l'Assistente</button>
-    <button id="btnStop">⬆️ Ferma e Invia</button>
-    
-    <br>
-    <button id="btnQuit">❌ Spegni Sistema</button>
-    
-    <div id="status">Inizializzazione in corso...</div>
-    <div id="result"></div>
+    <main>
+        <header>
+            <h1>Centro di Controllo</h1>
+            <p>Interfaccia Telecomando Web (PWA)</p>
+        </header>
+        
+        <section aria-label="Area fotocamera in tempo reale">
+            <video id="webcam" aria-label="Ripresa della fotocamera posteriore in tempo reale" autoplay playsinline muted></video>
+            <canvas id="hiddenCanvas" style="display: none;" aria-hidden="true"></canvas>
+        </section>
+        
+        <section aria-label="Controlli principali">
+            <button id="btnRecord" aria-label="Avvia la registrazione vocale">🔴 Parla con l'Assistente</button>
+            <button id="btnStop" aria-label="Ferma la registrazione e invia la richiesta">⬆️ Ferma e Invia</button>
+            <br>
+            <button id="btnQuit" aria-label="Spegni definitivamente il sistema">❌ Spegni Sistema</button>
+        </section>
+        
+        <section aria-label="Stato del sistema">
+            <div id="status" aria-live="polite" aria-atomic="true">Inizializzazione in corso...</div>
+            
+            <div id="result" aria-live="assertive"></div>
+        </section>
+    </main>
 
     <script>
         let isRecordingOrWaiting = false;
@@ -98,7 +168,7 @@ HTML_PAGE = """
 
         const btnRecord = document.getElementById('btnRecord');
         const btnStop = document.getElementById('btnStop');
-        const btnQuit = document.getElementById('btnQuit'); // Riferimento al nuovo bottone
+        const btnQuit = document.getElementById('btnQuit');
         const statusDiv = document.getElementById('status');
         const resultDiv = document.getElementById('result');
 
@@ -117,24 +187,20 @@ HTML_PAGE = """
             }
         }
 
-        // ======= INIZIALIZZAZIONE UNIFICATA (Fotocamera, Microfono, Voce) =======
+        // ======= INIZIALIZZAZIONE UNIFICATA =======
         document.getElementById('btnInit').onclick = async () => {
-            // Sblocca la voce
             const u = new SpeechSynthesisUtterance('');
             window.speechSynthesis.speak(u);
             document.getElementById('initOverlay').style.display = 'none';
 
             try {
-                // Richiede fotocamera posteriore e microfono
                 const stream = await navigator.mediaDevices.getUserMedia({ 
                     audio: true, 
                     video: { facingMode: "environment", width: { ideal: 640 }, height: { ideal: 480 } } 
                 });
                 
-                // Assegna il flusso video all'interfaccia
                 videoEl.srcObject = stream;
                 
-                // Estrae solo la traccia audio per inviarla a Dialogflow
                 const audioStream = new MediaStream(stream.getAudioTracks());
                 mediaRecorder = new MediaRecorder(audioStream);
                 
@@ -155,7 +221,7 @@ HTML_PAGE = """
                         resultDiv.style.display = 'block';
                         
                         if (data.errore) {
-                            resultDiv.innerHTML = `<p style="color: #ff4757;"><strong>Errore:</strong> ${data.errore}</p>`;
+                            resultDiv.innerHTML = `<p style="color: #d63031;"><strong>Errore:</strong> ${data.errore}</p>`;
                             statusDiv.innerText = 'Errore.';
                             parla("Si è verificato un errore di elaborazione.");
                         } else {
@@ -169,10 +235,9 @@ HTML_PAGE = """
                             } else if ((intentoLower.includes('disattiva') && intentoLower.includes('rilevamento')) || intentoLower.includes('navig')) {
                                 fetch('/api/imposta-comando', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({comando: 'S_VOICE'}) }).catch(console.error);
                             } else if (intentoLower.includes('terminazione')) {
-                                // Ora anche la terminazione da voce invia il comando Q_VOICE
                                 fetch('/api/imposta-comando', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({comando: 'Q_VOICE'}) }).catch(console.error);
                                 setTimeout(() => {
-                                    document.body.innerHTML = "<h1 style='margin-top: 50px; color: #ff4757;'>Sistema Disattivato</h1><p>Puoi chiudere questa app.</p>";
+                                    document.body.innerHTML = "<h1 style='margin-top: 50px; color: #d63031;'>Sistema Disattivato</h1><p>Puoi chiudere questa app.</p>";
                                 }, 2000);
                             }
                             isRecordingOrWaiting = false;
@@ -186,16 +251,11 @@ HTML_PAGE = """
 
                 // LOOP STREAMING FOTOGRAMMI VERSO IL PC (10 FPS)
                setInterval(() => {
-                    // Ignoriamo readyState e controlliamo solo se il video ha effettivamente una dimensione
                     if (videoEl.videoWidth > 0 && videoEl.videoHeight > 0) {
-                        // Ridimensiona il canvas nascosto alle stesse dimensioni del video
                         canvasEl.width = videoEl.videoWidth;
                         canvasEl.height = videoEl.videoHeight;
-                        
-                        // "Scatta la foto" disegnando il frame corrente del video sul canvas
                         ctx.drawImage(videoEl, 0, 0, canvasEl.width, canvasEl.height);
                         
-                        // Converte il canvas in un file JPEG (qualità 50%) e lo invia a Flask
                         canvasEl.toBlob((blob) => {
                             if(!blob) return;
                             const frameFormData = new FormData();
@@ -212,7 +272,7 @@ HTML_PAGE = """
                 statusDiv.innerText = 'Permessi negati.';
             }
 
-            // Polling Messaggi Vocali (dal modulo Python verso il telefono)
+            // Polling Messaggi Vocali
             pollingInterval = setInterval(async () => {
                 if (isRecordingOrWaiting) return;
                 try {
@@ -253,17 +313,15 @@ HTML_PAGE = """
                 parla("Spegnimento del sistema in corso. A presto.", true);
                 
                 try {
-                    // Invia il comando di "Quit" al server
                     await fetch('/api/imposta-comando', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({comando: 'Q_VOICE'})
                     });
                     
-                    // Svuota la pagina per far capire all'utente che è tutto spento
                     setTimeout(() => {
-                        document.body.innerHTML = "<h1 style='margin-top: 50px; color: #ff4757;'>Sistema Disattivato</h1><p>Puoi chiudere questa app.</p>";
-                    }, 2000); // Aspetta 2 secondi per far finire la frase vocale
+                        document.body.innerHTML = "<h1 style='margin-top: 50px; color: #d63031;'>Sistema Disattivato</h1><p>Puoi chiudere questa app.</p>";
+                    }, 2000);
                     
                 } catch(e) {
                     alert("Errore durante lo spegnimento.");
@@ -292,15 +350,20 @@ HTML_PAGE = """
 def manifest():
     """Fornisce il file di configurazione della PWA al browser."""
     manifest_data = {
-        "name": "Assistente di Navigazione",
-        "short_name": "NavAssist",
+        "name": "TrackBuddy - Assistente di Navigazione",
+        "short_name": "TrackBuddy",
         "start_url": "/",
         "display": "standalone",
-        "background_color": "#121212",
-        "theme_color": "#2ed573",
+        "background_color": "#f8f9fa",
+        "theme_color": "#0984e3",
         "icons": [
             {
-                "src": "https://cdn-icons-png.flaticon.com/512/1086/1086103.png", 
+                "src": "/static/Icon.png?v=2", 
+                "sizes": "192x192",
+                "type": "image/png"
+            },
+            {
+                "src": "/static/Icon.png?v=2", 
                 "sizes": "512x512",
                 "type": "image/png"
             }
