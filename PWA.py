@@ -200,27 +200,18 @@ HTML_PAGE = """
                 const dispositivi = await navigator.mediaDevices.enumerateDevices();
                 const fotocamere = dispositivi.filter(device => device.kind === 'videoinput');
                 tempStream.getTracks().forEach(track => track.stop());
-                
-                // 2. STAMPA DIAGNOSTICA DELLE FOTOCAMERE SULLO SCHERMO DEL TELEFONO
-                let testoLog = "<b>FOTOCAMERE TROVATE SUL TUO TELEFONO:</b><br>";
-                fotocamere.forEach((f, indice) => {
-                    testoLog += `[${indice}] Nome: "${f.label}" | ID: ${f.deviceId.substring(0,6)}...<br>`;
-                });
-                debugLogElement.innerHTML = testoLog;
 
-                // 3. SELEZIONE FORZATA: PROVIAMO AD INVERTIRE IL PREDEFINITO.
-                // Se prima prendeva l'indice [0] ed era ultrawide, proviamo l'indice [1] se esiste, altrimenti l'indice [0].
+                // 2. Selezione fotocamera posteriore
                 let idFotocameraTarget = null;
-                if (fotocamere.length > 1) {
-                    // Molti telefoni mettono l'ultrawide a indice 0 e la normale a indice 1 o viceversa
+                if (fotocamere.length > 2) {
                     idFotocameraTarget = fotocamere[2].deviceId;
-                    debugLogElement.innerHTML += `<br><span style="color:blue">Tentativo forzato su Fotocamera Indice [1]: ${fotocamere[1].label}</span>`;
+                } else if (fotocamere.length > 1) {
+                    idFotocameraTarget = fotocamere[1].deviceId;
                 } else if (fotocamere.length > 0) {
                     idFotocameraTarget = fotocamere[0].deviceId;
-                    debugLogElement.innerHTML += `<br><span style="color:red">Unica fotocamera rilevata. Indice [0]</span>`;
                 }
 
-                // 4. Avvio del flusso
+                // 3. Avvio del flusso
                 const vincoliFlusso = {
                     audio: true,
                     video: idFotocameraTarget ? { deviceId: { exact: idFotocameraTarget }, width: { ideal: 640 }, height: { ideal: 480 } } : { facingMode: "environment" }

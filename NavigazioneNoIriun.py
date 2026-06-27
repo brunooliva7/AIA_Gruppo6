@@ -692,14 +692,20 @@ class GestoreMonitoraggio:
         if not self.attivo:
             return
 
-        # Se la voce sta ancora parlando, non fare nulla
+        # FIX #3: Se la voce sta ancora parlando (semaforo non libero), aspetta.
+        # Non si fa nulla finché la frase corrente non è terminata completamente.
         if not self._voce.semaforo.is_set():
             return
 
-        # La voce ha finito e c'era un'analisi in corso → sblocca il frame
+        # FIX #4: La voce ha finito e c'era un'analisi in corso →
+        # il frame è stato descritto, ora lo scongeliamo per acquisirne uno nuovo.
         if self._analisi_in_corso:
             self._analisi_in_corso = False
-            self._frame_congelato  = None   # il loop catturerà un frame fresco
+            self._frame_congelato  = None   # <-- FIX #4: sblocca l'acquisizione del prossimo frame
+            return
+
+        # Aspetta che YOLO non sia occupato prima di leggere i risultati
+        if self._dati["yolo_occupato"]:
             return
 
         # Nuova analisi ogni 4 secondi
@@ -707,7 +713,10 @@ class GestoreMonitoraggio:
         if now - self._ultimo_annuncio > 4.0:
             descrizione = self._yolo.descrivi_ambiente(frame)
             if descrizione:
-                self._voce.parla(descrizione, interrompi_subito=True)
+                # FIX #3: usa prioritario=True (NON interrompi_subito) così la frase
+                # viene messa in coda e letta per intero senza che il browser esegua
+                # speechSynthesis.cancel() e tronchi l'audio.
+                self._voce.parla(descrizione, prioritario=True)
                 self._analisi_in_corso = True
             self._ultimo_annuncio = time.time()
 
@@ -716,25 +725,29 @@ class GestoreMonitoraggio:
     def gestisci_tasto(self, tasto, da_voce=False):
         if tasto == ord('w') or tasto == ord('W'):
             if not self.attivo:
-                self.attivo = True
-                self._ultimo_annuncio = 0
+                self.attivo            = True
+                # FIX #1: Non azzeriamo l'ultimo annuncio a 0 — partiamo dal tempo
+                # attuale così YOLO aspetta 4 secondi interi dopo la frase introduttiva,
+                # invece di scattare subito e interrompere la voce.
+                self._ultimo_annuncio  = time.time()
+                self._analisi_in_corso = False
+                self._frame_congelato  = None
                 self._voce.parla(
                     "Monitoraggio ambientale attivato. Metti il telefono parallelo al petto.",
                     interrompi_subito=da_voce,
                     prioritario=not da_voce
                 )
-                self._voce.semaforo.wait()   
                 print("[SISTEMA] Monitoraggio Ambientale Continuo: ACCESO")
         elif tasto == ord('s') or tasto == ord('S'):
             if self.attivo:
-                self.attivo = False
-                self._frame_congelato = None
+                self.attivo            = False
+                self._frame_congelato  = None
+                self._analisi_in_corso = False
                 self._voce.parla(
                     "Monitoraggio ambientale disattivato. Metti il telefono parallelo al pavimento. Torno alla navigazione.",
                     interrompi_subito=da_voce,
                     prioritario=not da_voce
                 )
-                self._voce.semaforo.wait()   
                 print("[SISTEMA] Monitoraggio Ambientale Continuo: SPENTO")
 
 
@@ -848,25 +861,43 @@ def main():
             cv2.imshow("Navigation System", frame_attesa)
             continue
 
-        # ── 3. MODALITÀ MONITORAGGIO AMBIENTALE (frame congelato) ──────────────
+        # ── 3. MODALITÀ MONITORAGGIO AMBIENTALE ────────────────────────────────
         if monitoraggio.attivo:
+            frame_appena_congelato = False
 
-            # aggiorna() ha resettato _frame_congelato a None → vogliamo un frame fresco
-            # lo congeliamo con il frame appena arrivato in questo ciclo
             if monitoraggio._frame_congelato is None:
                 monitoraggio._frame_congelato = frame_corrente.copy()
-                # Resetta anche l'ultimo annuncio così YOLO parte subito sul frame nuovo
-                monitoraggio._ultimo_annuncio = 0
+                # Resetta YOLO sul nuovo frame congelato
+                dati_condivisi["frame_da_analizzare"] = monitoraggio._frame_congelato.copy()
+                # FIX #1 (coerenza): NON azzeriamo _ultimo_annuncio qui —
+                # il timer riparte da quando il frame è stato congelato, non da 0,
+                # per lasciare il tempo alla frase introduttiva di essere letta.
+                # (Il valore viene già gestito in gestisci_tasto per la prima attivazione.)
+                frame_appena_congelato = True
 
-            # Chiama aggiorna solo se il frame è congelato (non None)
-            monitoraggio.aggiorna(monitoraggio._frame_congelato, macchina)
+            # Chiama aggiorna solo se il frame non è stato appena congelato in questa iterazione
+            if not frame_appena_congelato:
+                monitoraggio.aggiorna(monitoraggio._frame_congelato, macchina)
 
-            # Mostra il frame congelato
-            frame_display  = monitoraggio._frame_congelato.copy()
+            # FIX #4: aggiorna() può aver rimesso _frame_congelato a None per
+            # segnalare che è ora di acquisire un nuovo frame.
+            # Se è così, usiamo il frame corrente come display temporaneo e
+            # lasciamo che al prossimo ciclo venga congelato un frame nuovo.
+            frame_da_mostrare = monitoraggio._frame_congelato if monitoraggio._frame_congelato is not None else frame_corrente
+
+            # Mostra il frame (congelato o quello corrente in transizione)
+            frame_display  = frame_da_mostrare.copy()
+            # FIX #2: disegna i bounding box YOLO sul frame congelato così
+            # l'utente (o chi monitora lo schermo) vede gli oggetti evidenziati.
+            frame_display, _ = yolo_r.disegna_su_frame(frame_display)
             frame_finale   = overlay.applica(frame_display, macchina, True)
             maschera_vuota = np.zeros(
                 (frame_display.shape[0], frame_display.shape[1]), dtype=np.uint8
             )
+            # Aggiorna il frame da analizzare per YOLO solo se il frame è ancora congelato
+            if monitoraggio._frame_congelato is not None and not dati_condivisi["yolo_occupato"] and not frame_appena_congelato:
+                dati_condivisi["frame_da_analizzare"] = monitoraggio._frame_congelato.copy()
+
             cv2.imshow("Maschera", maschera_vuota)
             cv2.imshow("Navigation System", frame_finale)
             continue
