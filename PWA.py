@@ -139,6 +139,7 @@ HTML_PAGE = """
         
         <section aria-label="Area fotocamera in tempo reale">
             <video id="webcam" aria-label="Ripresa della fotocamera posteriore in tempo reale" autoplay playsinline muted></video>
+            <div id="debugLog" style="font-size:0.75rem; word-break:break-all; background:#dfe6e9; padding:8px; text-align:left; border-radius:8px; margin:8px 0;"></div>
             <canvas id="hiddenCanvas" style="display: none;" aria-hidden="true"></canvas>
         </section>
         
@@ -171,6 +172,7 @@ HTML_PAGE = """
         const btnQuit = document.getElementById('btnQuit');
         const statusDiv = document.getElementById('status');
         const resultDiv = document.getElementById('result');
+        const debugLogElement = document.getElementById('debugLog');
 
         // ======= FUNZIONALITÀ TEXT-TO-SPEECH (Voce) =======
         window.utterances = [];
@@ -192,13 +194,38 @@ HTML_PAGE = """
             const u = new SpeechSynthesisUtterance('');
             window.speechSynthesis.speak(u);
             document.getElementById('initOverlay').style.display = 'none';
-
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({ 
-                    audio: true, 
-                    video: { facingMode: "environment", width: { ideal: 640 }, height: { ideal: 480 } } 
-                });
+                // 1. Sblocco permessi hardware
+                let tempStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+                const dispositivi = await navigator.mediaDevices.enumerateDevices();
+                const fotocamere = dispositivi.filter(device => device.kind === 'videoinput');
+                tempStream.getTracks().forEach(track => track.stop());
                 
+                // 2. STAMPA DIAGNOSTICA DELLE FOTOCAMERE SULLO SCHERMO DEL TELEFONO
+                let testoLog = "<b>FOTOCAMERE TROVATE SUL TUO TELEFONO:</b><br>";
+                fotocamere.forEach((f, indice) => {
+                    testoLog += `[${indice}] Nome: "${f.label}" | ID: ${f.deviceId.substring(0,6)}...<br>`;
+                });
+                debugLogElement.innerHTML = testoLog;
+
+                // 3. SELEZIONE FORZATA: PROVIAMO AD INVERTIRE IL PREDEFINITO.
+                // Se prima prendeva l'indice [0] ed era ultrawide, proviamo l'indice [1] se esiste, altrimenti l'indice [0].
+                let idFotocameraTarget = null;
+                if (fotocamere.length > 1) {
+                    // Molti telefoni mettono l'ultrawide a indice 0 e la normale a indice 1 o viceversa
+                    idFotocameraTarget = fotocamere[2].deviceId;
+                    debugLogElement.innerHTML += `<br><span style="color:blue">Tentativo forzato su Fotocamera Indice [1]: ${fotocamere[1].label}</span>`;
+                } else if (fotocamere.length > 0) {
+                    idFotocameraTarget = fotocamere[0].deviceId;
+                    debugLogElement.innerHTML += `<br><span style="color:red">Unica fotocamera rilevata. Indice [0]</span>`;
+                }
+
+                // 4. Avvio del flusso
+                const vincoliFlusso = {
+                    audio: true,
+                    video: idFotocameraTarget ? { deviceId: { exact: idFotocameraTarget }, width: { ideal: 640 }, height: { ideal: 480 } } : { facingMode: "environment" }
+                };
+                const stream = await navigator.mediaDevices.getUserMedia(vincoliFlusso);
                 videoEl.srcObject = stream;
                 
                 const audioStream = new MediaStream(stream.getAudioTracks());

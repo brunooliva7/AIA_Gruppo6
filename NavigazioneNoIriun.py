@@ -685,21 +685,33 @@ class GestoreMonitoraggio:
         self._dati            = dati_condivisi
         self.attivo           = False
         self._ultimo_annuncio = 0
+        self._frame_congelato = None
+        self._analisi_in_corso = False
 
     def aggiorna(self, frame, macchina: MacchinaStati):
         if not self.attivo:
             return
+
+        # Se la voce sta ancora parlando, non fare nulla
+        if not self._voce.semaforo.is_set():
+            return
+
+        # La voce ha finito e c'era un'analisi in corso → sblocca il frame
+        if self._analisi_in_corso:
+            self._analisi_in_corso = False
+            self._frame_congelato  = None   # il loop catturerà un frame fresco
+            return
+
+        # Nuova analisi ogni 4 secondi
         now = time.time()
         if now - self._ultimo_annuncio > 4.0:
             descrizione = self._yolo.descrivi_ambiente(frame)
             if descrizione:
                 self._voce.parla(descrizione, interrompi_subito=True)
-            time.sleep(0.1)
-            self._voce.semaforo.wait()
+                self._analisi_in_corso = True
             self._ultimo_annuncio = time.time()
 
         macchina.stato = STATO_NAVIGAZIONE
-        self._voce.svuota_coda()
 
     def gestisci_tasto(self, tasto, da_voce=False):
         if tasto == ord('w') or tasto == ord('W'):
@@ -716,6 +728,7 @@ class GestoreMonitoraggio:
         elif tasto == ord('s') or tasto == ord('S'):
             if self.attivo:
                 self.attivo = False
+                self._frame_congelato = None
                 self._voce.parla(
                     "Monitoraggio ambientale disattivato. Metti il telefono parallelo al pavimento. Torno alla navigazione.",
                     interrompi_subito=da_voce,
@@ -768,11 +781,10 @@ def main():
     print("3/3 Connessione allo Stream Video della PWA...")
     FRAME_URL = "http://127.0.0.1:5000/api/leggi-frame"
 
-    # --- NOVITÀ: CREIAMO LE SCHERMATE DI ATTESA PER APRIRE SUBITO LE FINESTRE ---
     frame_attesa = np.zeros((480, 640, 3), dtype=np.uint8)
-    cv2.putText(frame_attesa, "In attesa della videocamera (PWA)...", (40, 240), 
+    cv2.putText(frame_attesa, "In attesa della videocamera (PWA)...", (40, 240),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-    cv2.putText(frame_attesa, "Apri l'app sul telefono e premi 'Inizia'", (40, 280), 
+    cv2.putText(frame_attesa, "Apri l'app sul telefono e premi 'Inizia'", (40, 280),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
     maschera_attesa = np.zeros((480, 640), dtype=np.uint8)
 
@@ -803,6 +815,24 @@ def main():
     voce.parla("Dispositivo di assistenza attivo e in ascolto. Puoi iniziare a camminare.", prioritario=True)
 
     while dati_condivisi["running"]:
+
+        # ── 1. LETTURA TASTO E COMANDI VOCALI ──────────────────────────────────
+        tasto   = cv2.waitKey(1) & 0xFF
+        da_voce = False
+        cmd     = voce.comando_remoto
+        if cmd:
+            if   cmd in ['W', 'W_VOICE']: tasto = ord('w'); da_voce = True
+            elif cmd in ['S', 'S_VOICE']: tasto = ord('s'); da_voce = True
+            elif cmd in ['Q', 'Q_VOICE']: tasto = ord('q'); da_voce = True
+            if da_voce:
+                voce.svuota_coda()
+
+        monitoraggio.gestisci_tasto(tasto, da_voce=da_voce)
+
+        if tasto == ord('q'):
+            break
+
+        # ── 2. ACQUISIZIONE FRAME DAL TELEFONO ─────────────────────────────────
         frame_corrente = None
         try:
             r = requests.get(FRAME_URL, timeout=0.5)
@@ -810,69 +840,68 @@ def main():
                 nparr = np.frombuffer(r.content, np.uint8)
                 frame_corrente = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         except requests.exceptions.RequestException:
-            pass # Ignoriamo gli errori se il server web non è ancora acceso
+            pass
 
-        # SE IL TELEFONO NON HA ANCORA INVIATO IL VIDEO, MOSTRA LA SCHERMATA NERA
+        # Schermata di attesa se il telefono non ha ancora inviato video
         if frame_corrente is None:
             cv2.imshow("Maschera", maschera_attesa)
             cv2.imshow("Navigation System", frame_attesa)
-            
-            # Permette comunque di premere 'q' per uscire anche se il video non c'è
-            if cv2.waitKey(100) & 0xFF == ord('q'):
-                break
-            continue # Ricomincia il ciclo senza fare elaborazioni pesanti
+            continue
 
-        # =======================================================
-        # SE ARRIVA IL VIDEO DAL TELEFONO, ESEGUE L'ANALISI REALE
-        # =======================================================
+        # ── 3. MODALITÀ MONITORAGGIO AMBIENTALE (frame congelato) ──────────────
+        if monitoraggio.attivo:
+
+            # aggiorna() ha resettato _frame_congelato a None → vogliamo un frame fresco
+            # lo congeliamo con il frame appena arrivato in questo ciclo
+            if monitoraggio._frame_congelato is None:
+                monitoraggio._frame_congelato = frame_corrente.copy()
+                # Resetta anche l'ultimo annuncio così YOLO parte subito sul frame nuovo
+                monitoraggio._ultimo_annuncio = 0
+
+            # Chiama aggiorna solo se il frame è congelato (non None)
+            monitoraggio.aggiorna(monitoraggio._frame_congelato, macchina)
+
+            # Mostra il frame congelato
+            frame_display  = monitoraggio._frame_congelato.copy()
+            frame_finale   = overlay.applica(frame_display, macchina, True)
+            maschera_vuota = np.zeros(
+                (frame_display.shape[0], frame_display.shape[1]), dtype=np.uint8
+            )
+            cv2.imshow("Maschera", maschera_vuota)
+            cv2.imshow("Navigation System", frame_finale)
+            continue
+
+        # ── 4. MODALITÀ NAVIGAZIONE NORMALE ────────────────────────────────────
+
+        # Resetta il frame congelato quando il monitoraggio è spento
+        monitoraggio._frame_congelato = None
+
+        # Aggiorna il frame da analizzare per i thread YOLO e OCR
         if not dati_condivisi["yolo_occupato"] and not dati_condivisi["ocr_occupato"]:
             dati_condivisi["frame_da_analizzare"] = frame_corrente.copy()
 
+        # Disegna i bounding box YOLO sul frame corrente
         frame_corrente, _ = yolo_r.disegna_su_frame(frame_corrente)
 
-        if monitoraggio.attivo:
-            monitoraggio.aggiorna(frame_corrente, macchina)
-
+        # Analisi linee blu e stato macchina
         cartelli_disponibili = dati_condivisi["ocr_cartelli"].copy()
-
         frame_linee, maschera_linee, incrocio_rilevato, errore_x = analizzatore.elabora(
             frame_corrente.copy(), BLU_LOWER, BLU_UPPER
         )
+        macchina.aggiorna(errore_x, incrocio_rilevato, cartelli_disponibili,
+                          larghezza=frame_corrente.shape[1])
 
-        if not monitoraggio.attivo:
-            macchina.aggiorna(errore_x, incrocio_rilevato, cartelli_disponibili, larghezza=frame_corrente.shape[1])
-
-        tasto = cv2.waitKey(1) & 0xFF
-
-        da_voce = False
-        cmd = voce.comando_remoto
-        if cmd:
-            if cmd in ['W', 'W_VOICE']:
-                tasto = ord('w')
-                da_voce = True
-            elif cmd in ['S', 'S_VOICE']:
-                tasto = ord('s')
-                da_voce = True
-            elif cmd in ['Q', 'Q_VOICE']:
-                tasto = ord('q')
-                da_voce = True
-            if da_voce:
-                voce.svuota_coda()   
-
-        monitoraggio.gestisci_tasto(tasto, da_voce=da_voce)
-
-        if tasto == ord('q'):
-            break
-
-        frame_finale = overlay.applica(frame_linee, macchina, monitoraggio.attivo)
-        
-        # MOSTRA LE FINESTRE CON IL VIDEO REALE
+        # Visualizzazione
+        frame_finale = overlay.applica(frame_linee, macchina, False)
         cv2.imshow("Maschera", maschera_linee)
         cv2.imshow("Navigation System", frame_finale)
 
     dati_condivisi["running"] = False
     cv2.destroyAllWindows()
 
+
+if __name__ == "__main__":
+    main()
 
 if __name__ == "__main__":
     main()
