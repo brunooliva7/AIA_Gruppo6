@@ -241,7 +241,20 @@ HTML_PAGE = """
                         if (data.errore) {
                             resultDiv.innerHTML = `<p style="color: #d63031;"><strong>Errore:</strong> ${data.errore}</p>`;
                             statusDiv.innerText = 'Errore.';
-                            parla("Si è verificato un errore di elaborazione.");
+                            
+                            // 1. Nuova frase di errore personalizzata
+                            parla("Si è verificato un errore. Riprenderò la navigazione assistita, attendere nuove indicazioni.", true);
+                            
+                            // 2. Timeout allungato per la frase più lunga
+                            setTimeout(() => {
+                                isRecordingOrWaiting = false; 
+                                statusDiv.innerText = 'Pronto per registrare.'; 
+                                resultDiv.style.display = 'none'; 
+                                // 3. Svuota la coda dei messaggi vecchi di Python per sbloccare la navigazione!
+                                fetch('/api/svuota-messaggi', {method: 'POST'}).catch(()=>{});
+                                fetch('/api/imposta-comando', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({comando: 'S_VOICE'}) }).catch(console.error);
+                            }, 5500);
+                            
                         } else {
                             resultDiv.innerHTML = `<p><strong>Hai detto:</strong> "${data.testo_riconosciuto || '...'}"</p><p><strong>Risposta Bot:</strong> ${data.risposta_dialogflow}</p>`;
                             statusDiv.innerText = 'Risposta ricevuta!';
@@ -253,7 +266,14 @@ HTML_PAGE = """
                             } else if ((intentoLower.includes('disattiva') && intentoLower.includes('rilevamento')) || intentoLower.includes('navig')) {
                                 fetch('/api/imposta-comando', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({comando: 'S_VOICE'}) }).catch(console.error);
                             } else if (intentoLower.includes('terminazione')) {
+                                // 1. Disattiva subito il polling e cancella la coda audio residua del browser
+                                if (pollingInterval) clearInterval(pollingInterval);
+                                window.speechSynthesis.cancel();
+                                
+                                // 2. Svuota i messaggi sul server e spegne Python
+                                fetch('/api/svuota-messaggi', {method: 'POST'}).catch(()=>{});
                                 fetch('/api/imposta-comando', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({comando: 'Q_VOICE'}) }).catch(console.error);
+                                
                                 setTimeout(() => {
                                     document.body.innerHTML = "<h1 style='margin-top: 50px; color: #d63031;'>Sistema Disattivato</h1><p>Puoi chiudere questa app.</p>";
                                 }, 2000);
@@ -262,11 +282,21 @@ HTML_PAGE = """
                         }
                     } catch (error) {
                         statusDiv.innerText = 'Errore di connessione.';
-                        parla("Impossibile connettersi al server.", true);
-                        isRecordingOrWaiting = false;
+                        
+                        // 1. Nuova frase di errore personalizzata
+                        parla("Si è verificato un errore di connessione. Riprenderò la navigazione assistita, attendere nuove indicazioni.", true);
+                        
+                        // 2. Timeout allungato
+                        setTimeout(() => {
+                            isRecordingOrWaiting = false;
+                            statusDiv.innerText = 'Pronto per registrare.'; 
+                            resultDiv.style.display = 'none'; 
+                            // 3. Svuota la coda dei messaggi vecchi!
+                            fetch('/api/svuota-messaggi', {method: 'POST'}).catch(()=>{});
+                            fetch('/api/imposta-comando', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({comando: 'S_VOICE'}) }).catch(console.error);
+                        }, 5500);
                     }
                 };
-
                 // LOOP STREAMING FOTOGRAMMI VERSO IL PC (10 FPS)
                setInterval(() => {
                     if (videoEl.videoWidth > 0 && videoEl.videoHeight > 0) {
@@ -325,12 +355,25 @@ HTML_PAGE = """
         };
 
         // ======= PULSANTE DI SPEGNIMENTO =======
+       // ======= PULSANTE DI SPEGNIMENTO =======
         btnQuit.onclick = async () => {
             if (confirm("Vuoi davvero spegnere l'assistente e chiudere tutto?")) {
                 statusDiv.innerText = 'Spegnimento in corso...';
+                
+                // 1. Interrompe immediatamente il timer di ascolto dei messaggi da Python
+                if (pollingInterval) clearInterval(pollingInterval);
+                
+                // 2. Cancella all'istante qualsiasi frase di navigazione rimasta in coda nel browser
+                window.speechSynthesis.cancel();
+                
+                // 3. Pronuncia la frase di spegnimento
                 parla("Spegnimento del sistema in corso. A presto.", true);
                 
                 try {
+                    // 4. Svuota i messaggi residui sul server Flask per sicurezza
+                    await fetch('/api/svuota-messaggi', {method: 'POST'}).catch(()=>{});
+                    
+                    // 5. Invia l'ordine di chiusura definitivo a Python
                     await fetch('/api/imposta-comando', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
