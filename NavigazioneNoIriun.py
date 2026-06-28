@@ -230,12 +230,12 @@ class RilevatorYOLO:
 
     @staticmethod
     def calcola_distanza_altezza(altezza_reale_cm, altezza_pixel):
-        """Metodo 1: Basato sull'altezza ipotetica dell'oggetto (Vostro metodo originale)"""
+        """Metodo 1: Basato sull'altezza ipotetica dell'oggetto"""
         if altezza_pixel <= 0: return float('inf')
         return (altezza_reale_cm * FOCAL_LENGTH) / altezza_pixel
 
     def calcola_distanza_suolo(self, y_max, altezza_frame):
-        """Metodo 2: Basato sul punto in cui l'oggetto tocca il pavimento (Ground Plane)"""
+        """Metodo 2: Basato sul punto in cui l'oggetto tocca il pavimento"""
         centro_y = altezza_frame / 2
         # Se la base dell'oggetto è nella metà superiore dello schermo, è all'orizzonte o sospeso
         if y_max <= centro_y:
