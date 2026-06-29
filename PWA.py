@@ -45,8 +45,8 @@ HTML_PAGE = """
     
     <link rel="manifest" href="/manifest.json">
     
-    <link rel="icon" href="/static/Icon.png?v=2" type="image/png">
-    <link rel="apple-touch-icon" href="/static/Icon.png?v=2">
+    <link rel="icon" href="/static/Icon.png?v=3" type="image/png">
+    <link rel="apple-touch-icon" href="/static/Icon.png?v=3">
     
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="default">
@@ -419,12 +419,12 @@ def manifest():
         "theme_color": "#0984e3",
         "icons": [
             {
-                "src": "/static/Icon.png?v=2", 
+                "src": "/static/Icon.png?v=3", 
                 "sizes": "192x192",
                 "type": "image/png"
             },
             {
-                "src": "/static/Icon.png?v=2", 
+                "src": "/static/Icon.png?v=3", 
                 "sizes": "512x512",
                 "type": "image/png"
             }
