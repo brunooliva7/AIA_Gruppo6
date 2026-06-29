@@ -531,11 +531,15 @@ class MacchinaStati:
         self._analizzatore         = analizzatore
         self._dati                 = dati_condivisi
         self.stato                 = STATO_NAVIGAZIONE
-        self._direzione_da_prendere = None
-        self._tempo_inizio_svolta  = 0
-        self._mappa_cartelli       = {}
-        self._fase_recupero        = 0
-        self._correzione_in_corso  = False
+        self._direzione_da_prendere    = None
+        self._tempo_inizio_svolta      = 0
+        self._mappa_cartelli           = {}
+        self._fase_recupero            = 0
+        self._correzione_in_corso      = False
+        # Flag: True quando la frase "Ruota di 90 gradi" è stata PRONUNCIATA per intero.
+        # Il timer della svolta parte solo da quel momento, non dal momento in cui
+        # la frase viene messa in coda (altrimenti scatta prima che la voce abbia finito).
+        self._svolta_frase_pronunciata = False
 
     @property
     def mappa_cartelli(self):
@@ -650,8 +654,9 @@ class MacchinaStati:
 
             for testo, direzione in cartelli_disponibili.items():
                 if direzione in ["DESTRA", "SINISTRA", "DRITTO"]:
-                    self._direzione_da_prendere = direzione
-                    self._tempo_inizio_svolta   = time.time()
+                    self._direzione_da_prendere    = direzione
+                    self._tempo_inizio_svolta      = time.time()
+                    self._svolta_frase_pronunciata = False   # il timer parte DOPO la frase
                     self.stato = STATO_SVOLTA_AUTOMATICA
                     print(f"[STATO] Transizione a SVOLTA AUTOMATICA. Direzione: {direzione}")
                     if direzione == "SINISTRA":
@@ -663,12 +668,23 @@ class MacchinaStati:
                     break
 
     def _stato_svolta(self):
+        # FASE 1: aspetta che la voce finisca di pronunciare la frase della rotazione.
+        # Il semaforo è "set" quando il motore vocale è libero (nessuna frase in corso).
+        if not self._svolta_frase_pronunciata:
+            if self._voce.semaforo.is_set():
+                # La frase è stata pronunciata per intero: ora avvia il timer reale.
+                self._svolta_frase_pronunciata = True
+                self._tempo_inizio_svolta = time.time()
+            return  # in ogni caso, non fare altro finché la frase non è finita
+
+        # FASE 2: la frase è finita, aspetta la durata della manovra fisica.
         durata = 2.5 if self._direzione_da_prendere in ["DESTRA", "SINISTRA"] else 1.5
         if time.time() - self._tempo_inizio_svolta > durata:
             self._voce.parla("Manovra completata. Riprendo l'assistenza sul percorso lineare.", prioritario=True)
             self._dati["ocr_cartelli"] = {}
             self._mappa_cartelli = {}
             self._analizzatore.diramazione_vista_prima = False
+            self._svolta_frase_pronunciata = False
             self.stato = STATO_NAVIGAZIONE
             print("[STATO] Manovra conclusa. Ritorno a NAVIGAZIONE.")
 
@@ -678,60 +694,102 @@ class MacchinaStati:
 # =============================================================================
 
 class GestoreMonitoraggio:
+    """
+    Macchina a stati interna per il monitoraggio ambientale:
+
+        ATTESA_FRASE_INTRO  → aspetta che la frase di attivazione finisca
+             ↓
+        ACQUISISCI_FRAME    → congela il frame corrente e lo manda a YOLO
+             ↓
+        ATTESA_YOLO         → aspetta che il thread YOLO finisca l'analisi
+             ↓
+        PRONUNCIA           → pronuncia la descrizione (o "nessun oggetto")
+             ↓
+        ATTESA_FINE_FRASE   → aspetta che il telefono finisca di leggere
+             ↓
+        ACQUISISCI_FRAME    → ricomincia con un frame nuovo
+    """
+
+    # Stati interni
+    _ST_ATTESA_FRASE_INTRO = "ATTESA_FRASE_INTRO"
+    _ST_ACQUISISCI_FRAME   = "ACQUISISCI_FRAME"
+    _ST_ATTESA_YOLO        = "ATTESA_YOLO"
+    _ST_PRONUNCIA          = "PRONUNCIA"
+    _ST_ATTESA_FINE_FRASE  = "ATTESA_FINE_FRASE"
 
     def __init__(self, voce: MotoreVocale, rilevatore_yolo: RilevatorYOLO, dati_condivisi):
         self._voce            = voce
         self._yolo            = rilevatore_yolo
         self._dati            = dati_condivisi
         self.attivo           = False
-        self._ultimo_annuncio = 0
-        self._frame_congelato = None
-        self._analisi_in_corso = False
+        self._stato           = self._ST_ACQUISISCI_FRAME
+        self.frame_congelato  = None   # pubblico: il loop main lo legge per visualizzarlo
 
-    def aggiorna(self, frame, macchina: MacchinaStati):
+    def aggiorna(self, frame_corrente, macchina: MacchinaStati):
+        """Chiamare ad ogni iterazione del loop principale quando monitoraggio.attivo è True."""
         if not self.attivo:
             return
 
-        # FIX #3: Se la voce sta ancora parlando (semaforo non libero), aspetta.
-        # Non si fa nulla finché la frase corrente non è terminata completamente.
-        if not self._voce.semaforo.is_set():
+        # ── ATTESA_FRASE_INTRO ──────────────────────────────────────────────────
+        # Aspetta che la frase di attivazione ("Monitoraggio attivato...") finisca
+        # prima di acquisire il primo frame.
+        if self._stato == self._ST_ATTESA_FRASE_INTRO:
+            if self._voce.semaforo.is_set():
+                self._stato = self._ST_ACQUISISCI_FRAME
             return
 
-        # FIX #4: La voce ha finito e c'era un'analisi in corso →
-        # il frame è stato descritto, ora lo scongeliamo per acquisirne uno nuovo.
-        if self._analisi_in_corso:
-            self._analisi_in_corso = False
-            self._frame_congelato  = None   # <-- FIX #4: sblocca l'acquisizione del prossimo frame
+        # ── ACQUISISCI_FRAME ────────────────────────────────────────────────────
+        # Prende il frame LIVE corrente, lo congela e lo manda a YOLO.
+        if self._stato == self._ST_ACQUISISCI_FRAME:
+            self.frame_congelato = frame_corrente.copy()
+            # Svuota i risultati precedenti di YOLO così non leggiamo dati vecchi
+            self._dati["yolo_labels"] = []
+            self._dati["yolo_bbox"]   = []
+            self._dati["yolo_conf"]   = []
+            self._dati["frame_da_analizzare"] = self.frame_congelato.copy()
+            self._stato = self._ST_ATTESA_YOLO
+            print("[MONITORAGGIO] Nuovo frame congelato, avvio analisi YOLO.")
             return
 
-        # Aspetta che YOLO non sia occupato prima di leggere i risultati
-        if self._dati["yolo_occupato"]:
+        # ── ATTESA_YOLO ─────────────────────────────────────────────────────────
+        # Aspetta che il thread YOLO abbia processato il frame congelato.
+        # La condizione è: yolo_occupato è False E yolo_labels è stata aggiornata
+        # (non è più la lista vuota che abbiamo impostato noi sopra).
+        if self._stato == self._ST_ATTESA_YOLO:
+            if not self._dati["yolo_occupato"]:
+                self._stato = self._ST_PRONUNCIA
             return
 
-        # Nuova analisi ogni 4 secondi
-        now = time.time()
-        if now - self._ultimo_annuncio > 4.0:
-            descrizione = self._yolo.descrivi_ambiente(frame)
-            if descrizione:
-                # FIX #3: usa prioritario=True (NON interrompi_subito) così la frase
-                # viene messa in coda e letta per intero senza che il browser esegua
-                # speechSynthesis.cancel() e tronchi l'audio.
-                self._voce.parla(descrizione, prioritario=True)
-                self._analisi_in_corso = True
-            self._ultimo_annuncio = time.time()
+        # ── PRONUNCIA ───────────────────────────────────────────────────────────
+        # Legge i risultati YOLO e pronuncia la descrizione.
+        if self._stato == self._ST_PRONUNCIA:
+            descrizione = self._yolo.descrivi_ambiente(self.frame_congelato)
+            if not descrizione:
+                descrizione = "Nessun oggetto rilevato nell'ambiente."
+            self._voce.parla(descrizione, prioritario=True)
+            self._stato = self._ST_ATTESA_FINE_FRASE
+            print(f"[MONITORAGGIO] Pronuncio: {descrizione[:60]}...")
+            return
+
+        # ── ATTESA_FINE_FRASE ───────────────────────────────────────────────────
+        # Aspetta che il telefono finisca di leggere la frase, poi ricomincia
+        # da capo acquisendo un frame nuovo (che sarà già diverso dal precedente).
+        if self._stato == self._ST_ATTESA_FINE_FRASE:
+            if self._voce.semaforo.is_set():
+                self.frame_congelato = None   # libera il frame mostrato a schermo
+                self._stato = self._ST_ACQUISISCI_FRAME
+                print("[MONITORAGGIO] Frase finita. Pronto per il prossimo frame.")
+            return
 
         macchina.stato = STATO_NAVIGAZIONE
 
     def gestisci_tasto(self, tasto, da_voce=False):
         if tasto == ord('w') or tasto == ord('W'):
             if not self.attivo:
-                self.attivo            = True
-                # FIX #1: Non azzeriamo l'ultimo annuncio a 0 — partiamo dal tempo
-                # attuale così YOLO aspetta 4 secondi interi dopo la frase introduttiva,
-                # invece di scattare subito e interrompere la voce.
-                self._ultimo_annuncio  = time.time()
-                self._analisi_in_corso = False
-                self._frame_congelato  = None
+                self.attivo          = True
+                self.frame_congelato = None
+                # Prima cosa: aspetta che la frase introduttiva finisca
+                self._stato = self._ST_ATTESA_FRASE_INTRO
                 self._voce.parla(
                     "Monitoraggio ambientale attivato. Metti il telefono parallelo al petto.",
                     interrompi_subito=da_voce,
@@ -740,9 +798,9 @@ class GestoreMonitoraggio:
                 print("[SISTEMA] Monitoraggio Ambientale Continuo: ACCESO")
         elif tasto == ord('s') or tasto == ord('S'):
             if self.attivo:
-                self.attivo            = False
-                self._frame_congelato  = None
-                self._analisi_in_corso = False
+                self.attivo          = False
+                self.frame_congelato = None
+                self._stato          = self._ST_ACQUISISCI_FRAME
                 self._voce.parla(
                     "Monitoraggio ambientale disattivato. Metti il telefono parallelo al pavimento. Torno alla navigazione.",
                     interrompi_subito=da_voce,
@@ -863,41 +921,23 @@ def main():
 
         # ── 3. MODALITÀ MONITORAGGIO AMBIENTALE ────────────────────────────────
         if monitoraggio.attivo:
-            frame_appena_congelato = False
+            # Tutta la logica di congelamento/analisi/sblocco è dentro aggiorna().
+            # Passiamo il frame LIVE ad ogni ciclo: aggiorna() decide internamente
+            # se usarlo (per congelare un nuovo frame) o ignorarlo.
+            monitoraggio.aggiorna(frame_corrente, macchina)
 
-            if monitoraggio._frame_congelato is None:
-                monitoraggio._frame_congelato = frame_corrente.copy()
-                # Resetta YOLO sul nuovo frame congelato
-                dati_condivisi["frame_da_analizzare"] = monitoraggio._frame_congelato.copy()
-                # FIX #1 (coerenza): NON azzeriamo _ultimo_annuncio qui —
-                # il timer riparte da quando il frame è stato congelato, non da 0,
-                # per lasciare il tempo alla frase introduttiva di essere letta.
-                # (Il valore viene già gestito in gestisci_tasto per la prima attivazione.)
-                frame_appena_congelato = True
+            # Per la visualizzazione usiamo il frame congelato se disponibile,
+            # altrimenti il frame live (durante la transizione tra un ciclo e l'altro).
+            frame_da_mostrare = monitoraggio.frame_congelato \
+                if monitoraggio.frame_congelato is not None \
+                else frame_corrente
 
-            # Chiama aggiorna solo se il frame non è stato appena congelato in questa iterazione
-            if not frame_appena_congelato:
-                monitoraggio.aggiorna(monitoraggio._frame_congelato, macchina)
-
-            # FIX #4: aggiorna() può aver rimesso _frame_congelato a None per
-            # segnalare che è ora di acquisire un nuovo frame.
-            # Se è così, usiamo il frame corrente come display temporaneo e
-            # lasciamo che al prossimo ciclo venga congelato un frame nuovo.
-            frame_da_mostrare = monitoraggio._frame_congelato if monitoraggio._frame_congelato is not None else frame_corrente
-
-            # Mostra il frame (congelato o quello corrente in transizione)
-            frame_display  = frame_da_mostrare.copy()
-            # FIX #2: disegna i bounding box YOLO sul frame congelato così
-            # l'utente (o chi monitora lo schermo) vede gli oggetti evidenziati.
+            frame_display = frame_da_mostrare.copy()
             frame_display, _ = yolo_r.disegna_su_frame(frame_display)
-            frame_finale   = overlay.applica(frame_display, macchina, True)
+            frame_finale  = overlay.applica(frame_display, macchina, True)
             maschera_vuota = np.zeros(
                 (frame_display.shape[0], frame_display.shape[1]), dtype=np.uint8
             )
-            # Aggiorna il frame da analizzare per YOLO solo se il frame è ancora congelato
-            if monitoraggio._frame_congelato is not None and not dati_condivisi["yolo_occupato"] and not frame_appena_congelato:
-                dati_condivisi["frame_da_analizzare"] = monitoraggio._frame_congelato.copy()
-
             cv2.imshow("Maschera", maschera_vuota)
             cv2.imshow("Navigation System", frame_finale)
             continue
