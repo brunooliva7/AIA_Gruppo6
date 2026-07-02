@@ -196,10 +196,6 @@ class MotoreVocale:
 
 # =============================================================================
 # RilevatorYOLO — Esegue il rilevamento ostacoli in un thread dedicato.
-# =============================================================================
-
-# =============================================================================
-# RilevatorYOLO — Esegue il rilevamento ostacoli in un thread dedicato.
 # Include la doppia stima della distanza (Focale + Ground Plane)
 # =============================================================================
 
@@ -209,7 +205,7 @@ class RilevatorYOLO:
         self._dati  = dati_condivisi
         self._model = yolo_model
         
-        # ALTEZZA A CUI È POSIZIONATA LA TELECAMERA SULL'UTENTE (Modifica se serve)
+        # ALTEZZA A CUI È POSIZIONATA LA TELECAMERA SULL'UTENTE
         self.ALTEZZA_TELEFONO_CM = 130 
 
     def avvia(self):
@@ -252,7 +248,7 @@ class RilevatorYOLO:
         dist_altezza = self.calcola_distanza_altezza(ALTEZZE_REALI_CM.get(label, ALTEZZA_DEFAULT), alt_pixel)
         dist_suolo = self.calcola_distanza_suolo(y_max, altezza_frame)
         
-        # Restituisce la distanza MINORE (se un metodo sbaglia sovrastimando, l'altro ci salva)
+        # Restituisce la distanza minore
         return min(dist_altezza, dist_suolo)
 
     def disegna_su_frame(self, frame):
@@ -296,7 +292,6 @@ class RilevatorYOLO:
             try:
                 x_min, y_min, x_max, y_max = bbox_visti[i]
                 
-                # USA LA DISTANZA OTTIMIZZATA ANCHE PER LA VOCE
                 distanza_cm = self.stima_distanza_migliore(label, y_min, y_max, altezza_frame)
                 distanza_m  = distanza_cm / 100.0
                 
@@ -312,7 +307,7 @@ class RilevatorYOLO:
                     
                 nome_ita = TRADUZIONI_ITA.get(label, f"un oggetto ({label})")
                 
-                # Costruisce la frase da leggere ad alta voce
+                # Costruisce la frase da leggere
                 if distanza_cm != float('inf'):
                     oggetti_descritti.append(f"{nome_ita} {lato}, a circa {distanza_m:.1f} metri")
                 else:
@@ -482,7 +477,7 @@ class AnalizzatoreLinea:
                     self._buffer_errore_x.pop(0)
                 errore_x = int(np.mean(self._buffer_errore_x))
 
-                # Stessa logica invertita: linea a destra → utente a sinistra
+                #Logica : linea a destra → utente a sinistra
                 if errore_x > 0:
                     self._ultima_direzione_errore = "sinistra"
                 elif errore_x < -TOLLERANZA_OK:
@@ -570,12 +565,8 @@ class MacchinaStati:
         elif errore_x is not None:
             self._fase_recupero = 0
             abs_err = abs(errore_x)
-            # errore_x = cx - centro_camera
-            # Se la linea appare a DESTRA nel frame (errore_x > 0) significa che
-            # l'utente si è spostato a SINISTRA rispetto alla linea, non a destra.
-            # Il lato indica dove si trova l'utente rispetto alla linea (non dove
-            # si trova la linea nel frame), quindi è il segno opposto dell'errore.
             lato = "sinistra" if errore_x > 0 else "destra"
+
             if abs_err <= TOLLERANZA_OK:
                 if self._correzione_in_corso:
                     self._correzione_in_corso = False
@@ -662,7 +653,7 @@ class MacchinaStati:
                 if direzione in ["DESTRA", "SINISTRA", "DRITTO"]:
                     self._direzione_da_prendere    = direzione
                     self._tempo_inizio_svolta      = time.time()
-                    self._svolta_frase_pronunciata = False   # il timer parte DOPO la frase
+                    self._svolta_frase_pronunciata = False
                     self.stato = STATO_SVOLTA_AUTOMATICA
                     print(f"[STATO] Transizione a SVOLTA AUTOMATICA. Direzione: {direzione}")
                     if direzione == "SINISTRA":
@@ -681,7 +672,7 @@ class MacchinaStati:
                 # La frase è stata pronunciata per intero: ora avvia il timer reale.
                 self._svolta_frase_pronunciata = True
                 self._tempo_inizio_svolta = time.time()
-            return  # in ogni caso, non fare altro finché la frase non è finita
+            return
 
         # FASE 2: la frase è finita, aspetta la durata della manovra fisica.
         durata = 2.5 if self._direzione_da_prendere in ["DESTRA", "SINISTRA"] else 1.5
@@ -729,7 +720,7 @@ class GestoreMonitoraggio:
         self._dati            = dati_condivisi
         self.attivo           = False
         self._stato           = self._ST_ACQUISISCI_FRAME
-        self.frame_congelato  = None   # pubblico: il loop main lo legge per visualizzarlo
+        self.frame_congelato  = None
 
     def aggiorna(self, frame_corrente, macchina: MacchinaStati):
         """Chiamare ad ogni iterazione del loop principale quando monitoraggio.attivo è True."""
@@ -760,7 +751,6 @@ class GestoreMonitoraggio:
         # ── ATTESA_YOLO ─────────────────────────────────────────────────────────
         # Aspetta che il thread YOLO abbia processato il frame congelato.
         # La condizione è: yolo_occupato è False E yolo_labels è stata aggiornata
-        # (non è più la lista vuota che abbiamo impostato noi sopra).
         if self._stato == self._ST_ATTESA_YOLO:
             if not self._dati["yolo_occupato"]:
                 self._stato = self._ST_PRONUNCIA
@@ -779,7 +769,7 @@ class GestoreMonitoraggio:
 
         # ── ATTESA_FINE_FRASE ───────────────────────────────────────────────────
         # Aspetta che il telefono finisca di leggere la frase, poi ricomincia
-        # da capo acquisendo un frame nuovo (che sarà già diverso dal precedente).
+        # da capo acquisendo un frame nuovo.
         if self._stato == self._ST_ATTESA_FINE_FRASE:
             if self._voce.semaforo.is_set():
                 self.frame_congelato = None   # libera il frame mostrato a schermo
@@ -794,7 +784,7 @@ class GestoreMonitoraggio:
             if not self.attivo:
                 self.attivo          = True
                 self.frame_congelato = None
-                # Prima cosa: aspetta che la frase introduttiva finisca
+                # Aspetta che la frase introduttiva finisca
                 self._stato = self._ST_ATTESA_FRASE_INTRO
                 self._voce.parla(
                     "Monitoraggio ambientale attivato. Metti il telefono parallelo al petto.",
@@ -928,8 +918,6 @@ def main():
         # ── 3. MODALITÀ MONITORAGGIO AMBIENTALE ────────────────────────────────
         if monitoraggio.attivo:
             # Tutta la logica di congelamento/analisi/sblocco è dentro aggiorna().
-            # Passiamo il frame LIVE ad ogni ciclo: aggiorna() decide internamente
-            # se usarlo (per congelare un nuovo frame) o ignorarlo.
             monitoraggio.aggiorna(frame_corrente, macchina)
 
             # Per la visualizzazione usiamo il frame congelato se disponibile,
