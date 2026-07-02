@@ -5,6 +5,7 @@ import threading
 import time
 import easyocr
 import queue
+import requests  # <-- Aggiunto per le richieste HTTP
 import speech_recognition as sr
 from cvlib.object_detection import YOLO
 import winsound  # Riconoscimento audio e feedback acustici di sistema
@@ -46,12 +47,10 @@ BLU_LOWER = np.array([95, 70, 30])
 BLU_UPPER = np.array([135, 255, 255])
 
 # Filtri geometrici per il riconoscimento linea
-# La linea del percorso è allungata (aspect ratio alta) e compatta (solidità alta).
-# Questi valori scartano oggetti blu compatti (mobili, abiti) e ombre frammentate.
-LINEA_ASPECT_RATIO_MIN = 1.5    # larghezza/altezza o altezza/larghezza minima del bounding box
-LINEA_SOLIDITA_MIN     = 0.25   # area contorno / area convex hull (ombre = bassa solidità)
-LINEA_SATURAZIONE_MIN  = 60     # saturazione HSV minima: le ombre hanno S bassa, il blu vero no
-LINEA_Y_MIN_FRAZIONE   = 0.20   # la linea deve iniziare almeno al 20% dall'alto del frame
+LINEA_ASPECT_RATIO_MIN = 1.5    
+LINEA_SOLIDITA_MIN     = 0.25   
+LINEA_SATURAZIONE_MIN  = 60     
+LINEA_Y_MIN_FRAZIONE   = 0.20   
 
 SOGLIA_MINIMA_PIXEL       = 3000
 SOGLIA_Y_INCROCIO         = 320
@@ -75,13 +74,6 @@ STATO_LINEA_PERSA       = "LINEA_PERSA"
 # =============================================================================
 # MotoreVocale — Gestisce la sintesi vocale TTS inviando i messaggi via HTTP
 # al server web locale (SitoWebDialogoVoice.py), che li riproduce sul telefono.
-#
-# Rispetto alla versione SAPI:
-#   • interrompi_subito=True  → invia taglia_audio al telefono per tagliare
-#     l'audio in corso e usare interruzione_voce per uscire subito dal wait
-#   • overflow protection     → se la coda supera 2 msg, la svuota e tiene solo l'ultimo
-#   • thread_polling_comandi  → thread separato che legge comandi W/S/Q dal server
-#     web e li espone tramite la property comando_remoto per il loop principale
 # =============================================================================
 
 class MotoreVocale:
@@ -94,31 +86,26 @@ class MotoreVocale:
         self._coda              = queue.Queue()
         self._semaforo          = threading.Event()
         self._semaforo.set()
-        self._interruzione_voce = threading.Event()   # sveglia il wait del TTS immediatamente
+        self._interruzione_voce = threading.Event()   
         self._ultimo_msg        = ""
         self._ultimo_tempo      = 0.0
-        self._comando_remoto    = None                # ultimo comando ricevuto dal telefono
+        self._comando_remoto    = None                
 
     def avvia(self):
         threading.Thread(target=self._loop_tts,     daemon=True).start()
         threading.Thread(target=self._loop_polling,  daemon=True).start()
 
-    # ------------------------------------------------------------------
-    # Thread TTS: invia i testi al server web e simula la durata di lettura
-    # ------------------------------------------------------------------
     def _loop_tts(self):
-        import requests
         print("[THREAD VOCE UNIFICATO] Pronto (invia i messaggi al server web).")
         while self._dati["running"]:
             try:
                 elemento = self._coda.get(timeout=0.5)
-                # L'elemento è sempre una tupla (testo, taglia_audio)
                 if isinstance(elemento, tuple):
                     testo, taglia_audio = elemento
                 else:
                     testo, taglia_audio = elemento, False
 
-                self._semaforo.clear()   # Rosso: il robot sta parlando
+                self._semaforo.clear()   
                 print(f"\n>>> [INVIATO AL TELEFONO]: {testo} <<<\n")
 
                 try:
@@ -127,15 +114,13 @@ class MotoreVocale:
                         json={"testo": testo, "taglia_audio": taglia_audio},
                         timeout=2
                     )
-                    # Simula il tempo di pronuncia (~1 sec ogni 10 caratteri).
-                    # interruzione_voce permette di uscire subito se arriva un msg prioritario.
                     tempo_lettura = max(1.0, len(testo) / 10.0)
                     self._interruzione_voce.wait(timeout=tempo_lettura)
                     self._interruzione_voce.clear()
                 except Exception as e:
                     print(f"[ERRORE] Invio messaggio al web fallito: {e}")
 
-                self._semaforo.set()     # Verde: il telefono ha finito
+                self._semaforo.set()     
                 self._coda.task_done()
             except queue.Empty:
                 continue
@@ -143,11 +128,7 @@ class MotoreVocale:
                 print(f"[ERRORE AUDIO] {e}")
                 self._semaforo.set()
 
-    # ------------------------------------------------------------------
-    # Thread polling: legge comandi W/S/Q inviati dall'interfaccia web
-    # ------------------------------------------------------------------
     def _loop_polling(self):
-        import requests
         print("[THREAD POLLING] In ascolto di comandi dall'interfaccia web...")
         while self._dati["running"]:
             try:
@@ -160,22 +141,13 @@ class MotoreVocale:
                 pass
             time.sleep(0.05)
 
-    # ------------------------------------------------------------------
-    # API pubblica
-    # ------------------------------------------------------------------
     def parla(self, testo, prioritario=False, interrompi_subito=False):
-        """
-        interrompi_subito=True  → interrompe subito l'audio in corso sul telefono
-                                   e svuota la coda (sostituisce il vecchio interrompi=True)
-        prioritario=True        → svuota la coda senza interrompere l'audio corrente
-        (default)               → messaggio normale con anti-spam (INTERVALLO_VOCE)
-        """
         now = time.time()
 
         if interrompi_subito:
-            self._interruzione_voce.set()          # sveglia il wait del TTS immediatamente
+            self._interruzione_voce.set()          
             self._svuota_coda_interna()
-            self._coda.put((testo, True))          # taglia_audio=True → il telefono taglia l'audio
+            self._coda.put((testo, True))          
             self._ultimo_msg   = ""
             self._ultimo_tempo = 0.0
 
@@ -190,11 +162,9 @@ class MotoreVocale:
             if testo != self._ultimo_msg or (now - self._ultimo_tempo) > INTERVALLO_VOCE:
                 self._semaforo.clear()
 
-                # Overflow protection: se la coda ha più di 2 messaggi,
-                # svuotala e tieni solo l'ultimo (evita messaggi di navigazione obsoleti)
                 if self._coda.qsize() > 2:
                     self._svuota_coda_interna()
-                    self._coda.put((testo, True))   # taglia_audio=True: segnala overflow
+                    self._coda.put((testo, True))   
                 else:
                     self._coda.put((testo, False))
 
@@ -219,7 +189,6 @@ class MotoreVocale:
 
     @property
     def comando_remoto(self):
-        """Restituisce e consuma l'ultimo comando ricevuto dal telefono (W/S/Q)."""
         cmd = self._comando_remoto
         self._comando_remoto = None
         return cmd
@@ -227,7 +196,11 @@ class MotoreVocale:
 
 # =============================================================================
 # RilevatorYOLO — Esegue il rilevamento ostacoli in un thread dedicato.
-# Aggiorna continuamente bbox, label e confidenze nel dizionario condiviso.
+# =============================================================================
+
+# =============================================================================
+# RilevatorYOLO — Esegue il rilevamento ostacoli in un thread dedicato.
+# Include la doppia stima della distanza (Focale + Ground Plane)
 # =============================================================================
 
 class RilevatorYOLO:
@@ -235,6 +208,9 @@ class RilevatorYOLO:
     def __init__(self, dati_condivisi, yolo_model):
         self._dati  = dati_condivisi
         self._model = yolo_model
+        
+        # ALTEZZA A CUI È POSIZIONATA LA TELECAMERA SULL'UTENTE (Modifica se serve)
+        self.ALTEZZA_TELEFONO_CM = 130 
 
     def avvia(self):
         threading.Thread(target=self._loop, daemon=True).start()
@@ -253,18 +229,43 @@ class RilevatorYOLO:
             time.sleep(0.01)
 
     @staticmethod
-    def calcola_distanza(altezza_reale_cm, altezza_pixel):
-        if altezza_pixel == 0:
-            return 0
+    def calcola_distanza_altezza(altezza_reale_cm, altezza_pixel):
+        """Metodo 1: Basato sull'altezza ipotetica dell'oggetto"""
+        if altezza_pixel <= 0: return float('inf')
         return (altezza_reale_cm * FOCAL_LENGTH) / altezza_pixel
+
+    def calcola_distanza_suolo(self, y_max, altezza_frame):
+        """Metodo 2: Basato sul punto in cui l'oggetto tocca il pavimento"""
+        centro_y = altezza_frame / 2
+        # Se la base dell'oggetto è nella metà superiore dello schermo, è all'orizzonte o sospeso
+        if y_max <= centro_y:
+            return float('inf')
+        
+        # Formula della prospettiva
+        return (self.ALTEZZA_TELEFONO_CM * FOCAL_LENGTH) / (y_max - centro_y)
+
+    def stima_distanza_migliore(self, label, y_min, y_max, altezza_frame):
+        """Combina i due metodi per avere sempre la distanza in cm più sicura"""
+        alt_pixel = y_max - y_min
+        
+        # Calcola entrambe le distanze
+        dist_altezza = self.calcola_distanza_altezza(ALTEZZE_REALI_CM.get(label, ALTEZZA_DEFAULT), alt_pixel)
+        dist_suolo = self.calcola_distanza_suolo(y_max, altezza_frame)
+        
+        # Restituisce la distanza MINORE (se un metodo sbaglia sovrastimando, l'altro ci salva)
+        return min(dist_altezza, dist_suolo)
 
     def disegna_su_frame(self, frame):
         ostacolo_vicino = False
+        altezza_frame = frame.shape[0]
+
         for i, label in enumerate(self._dati["yolo_labels"]):
             try:
                 x_min, y_min, x_max, y_max = self._dati["yolo_bbox"][i]
-                alt_pixel   = y_max - y_min
-                distanza_cm = self.calcola_distanza(ALTEZZE_REALI_CM.get(label, ALTEZZA_DEFAULT), alt_pixel)
+                
+                # Calcola la distanza reale ottimizzata
+                distanza_cm = self.stima_distanza_migliore(label, y_min, y_max, altezza_frame)
+                
                 cat = "PERSONA" if label == 'person' else "OGGETTO"
                 if distanza_cm < DISTANZA_ALLARME:
                     ostacolo_vicino = True
@@ -273,45 +274,60 @@ class RilevatorYOLO:
                                 (x_min, y_min - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                 else:
                     cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
-                    cv2.putText(frame, f"{cat} ({distanza_cm/100:.1f}m)",
-                                (x_min, y_min - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    if distanza_cm != float('inf'):
+                        cv2.putText(frame, f"{cat} ({distanza_cm/100:.1f}m)",
+                                    (x_min, y_min - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             except IndexError:
                 pass
         return frame, ostacolo_vicino
 
     def descrivi_ambiente(self, frame):
+        """Questa funzione genera la stringa che verrà letta vocalmente dal telefono"""
         labels_viste = list(self._dati.get("yolo_labels", []))
         bbox_visti   = list(self._dati.get("yolo_bbox", []))
+        altezza_frame = frame.shape[0]
+
         if not labels_viste:
             print("[AMBIENTE] Nessun oggetto rilevato nei thread di background...")
             return None
+            
         oggetti_descritti = []
         for i, label in enumerate(labels_viste):
             try:
                 x_min, y_min, x_max, y_max = bbox_visti[i]
-                alt_pixel   = y_max - y_min
-                distanza_cm = self.calcola_distanza(ALTEZZE_REALI_CM.get(label, ALTEZZA_DEFAULT), alt_pixel)
+                
+                # USA LA DISTANZA OTTIMIZZATA ANCHE PER LA VOCE
+                distanza_cm = self.stima_distanza_migliore(label, y_min, y_max, altezza_frame)
                 distanza_m  = distanza_cm / 100.0
+                
                 centro_x    = (x_min + x_max) / 2
                 larghezza_f = frame.shape[1]
+                
                 if centro_x < larghezza_f / 3:
                     lato = "alla tua sinistra"
                 elif centro_x > larghezza_f * 2 / 3:
                     lato = "alla tua destra"
                 else:
                     lato = "davanti a te"
+                    
                 nome_ita = TRADUZIONI_ITA.get(label, f"un oggetto ({label})")
-                oggetti_descritti.append(f"{nome_ita} {lato}, a circa {distanza_m:.1f} metri")
+                
+                # Costruisce la frase da leggere ad alta voce
+                if distanza_cm != float('inf'):
+                    oggetti_descritti.append(f"{nome_ita} {lato}, a circa {distanza_m:.1f} metri")
+                else:
+                    oggetti_descritti.append(f"{nome_ita} {lato} in lontananza")
+                    
             except (IndexError, Exception):
                 pass
+                
         if oggetti_descritti:
             return "Nell'ambiente rilevo: " + "; ".join(oggetti_descritti) + "."
         return "Non riesco a stimare la distanza degli oggetti rilevati."
 
 
 # =============================================================================
-# RilevatorOCR — Legge testi da cartelli in un thread dedicato e aggiorna
-# il dizionario condiviso con le direzioni riconosciute (DESTRA/SINISTRA/DRITTO).
+# RilevatorOCR — Legge testi da cartelli in un thread dedicato.
 # =============================================================================
 
 class RilevatorOCR:
@@ -354,9 +370,7 @@ class RilevatorOCR:
 
 
 # =============================================================================
-# AnalizzatoreLinea — Elabora ogni frame per rilevare la linea blu centrale,
-# calcola l'errore di posizione (con smoothing) e individua gli incroci.
-# Disegna le zone di confidenza sul frame.
+# AnalizzatoreLinea — Elabora ogni frame per rilevare la linea blu centrale.
 # =============================================================================
 
 class AnalizzatoreLinea:
@@ -386,29 +400,18 @@ class AnalizzatoreLinea:
 
     @staticmethod
     def _contorno_e_linea(contorno, hsv, altezza_frame):
-        """
-        Restituisce True solo se il contorno supera tutti i filtri anti-falso-positivo:
-
-        1. Area minima — scarta pixel sparsi e rumore
-        2. Aspect ratio — la linea è allungata, non quadrata come un oggetto blu generico
-        3. Solidità — area / convex_hull: ombre e riflessi sono frammentati (solidità bassa)
-        4. Posizione Y — la linea è a terra, non in alto nel frame (es. cielo, pareti)
-        5. Saturazione media HSV — le ombre hanno S bassa, un nastro blu vero ha S alta
-        """
         area = cv2.contourArea(contorno)
         if area < 1500:
             return False
 
         x, y, w, h = cv2.boundingRect(contorno)
 
-        # 1. Aspect ratio: almeno 1.5:1 in una delle due direzioni
         if w == 0 or h == 0:
             return False
         ratio = max(w / h, h / w)
         if ratio < LINEA_ASPECT_RATIO_MIN:
             return False
 
-        # 2. Solidità: area reale vs area del convex hull
         hull = cv2.convexHull(contorno)
         area_hull = cv2.contourArea(hull)
         if area_hull == 0:
@@ -417,7 +420,6 @@ class AnalizzatoreLinea:
         if solidita < LINEA_SOLIDITA_MIN:
             return False
 
-        # 3. Posizione Y: il baricentro non deve essere troppo in alto nel frame
         M = cv2.moments(contorno)
         if M["m00"] == 0:
             return False
@@ -425,8 +427,6 @@ class AnalizzatoreLinea:
         if cy < altezza_frame * LINEA_Y_MIN_FRAZIONE:
             return False
 
-        # 4. Saturazione media nella regione del contorno:
-        #    crea una maschera locale e leggi la saturazione media in HSV
         maschera_locale = np.zeros(hsv.shape[:2], dtype=np.uint8)
         cv2.drawContours(maschera_locale, [contorno], -1, 255, -1)
         saturazione_media = cv2.mean(hsv[:, :, 1], mask=maschera_locale)[0]
@@ -445,15 +445,12 @@ class AnalizzatoreLinea:
         hsv  = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, blu_lower, blu_upper)
 
-        # MORPH_OPEN rimuove il rumore puntuale;
-        # MORPH_CLOSE chiude i buchi causati da riflessi e variazioni di illuminazione
         kernel = np.ones((5, 5), np.uint8)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
         contorni, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        # Applica tutti i filtri geometrici e di saturazione
         contorni_validi = [
             c for c in contorni
             if self._contorno_e_linea(c, hsv, altezza)
@@ -466,12 +463,9 @@ class AnalizzatoreLinea:
                 self._diramazione_vista_prima = True
 
         if len(contorni_validi) > 0:
-            # Selezione intelligente del contorno tramite lambda function inline
             if self._ultima_x_valida is not None:
-                # Ordina per vicinanza all'ultima posizione nota calcolando il baricentro al volo
                 contorno_maggiore = min(contorni_validi,  key=lambda c: int(cv2.moments(c)["m10"] / cv2.moments(c)["m00"]) if cv2.moments(c)["m00"] > 0 else float('inf'))
             else:
-                # Fallback se non c'è un centro precedente: prendi il più grande
                 contorno_maggiore = max(contorni_validi, key=cv2.contourArea)
 
             moments = cv2.moments(contorno_maggiore)
@@ -527,8 +521,7 @@ class AnalizzatoreLinea:
 
 
 # =============================================================================
-# MacchinaStati — Gestisce la logica decisionale del sistema (navigazione,
-# linea persa, attesa incrocio, svolta automatica) e genera i comandi vocali.
+# MacchinaStati — Gestisce la logica decisionale del sistema.
 # =============================================================================
 
 class MacchinaStati:
@@ -538,11 +531,15 @@ class MacchinaStati:
         self._analizzatore         = analizzatore
         self._dati                 = dati_condivisi
         self.stato                 = STATO_NAVIGAZIONE
-        self._direzione_da_prendere = None
-        self._tempo_inizio_svolta  = 0
-        self._mappa_cartelli       = {}
-        self._fase_recupero        = 0
-        self._correzione_in_corso  = False
+        self._direzione_da_prendere    = None
+        self._tempo_inizio_svolta      = 0
+        self._mappa_cartelli           = {}
+        self._fase_recupero            = 0
+        self._correzione_in_corso      = False
+        # Flag: True quando la frase "Ruota di 90 gradi" è stata PRONUNCIATA per intero.
+        # Il timer della svolta parte solo da quel momento, non dal momento in cui
+        # la frase viene messa in coda (altrimenti scatta prima che la voce abbia finito).
+        self._svolta_frase_pronunciata = False
 
     @property
     def mappa_cartelli(self):
@@ -657,8 +654,9 @@ class MacchinaStati:
 
             for testo, direzione in cartelli_disponibili.items():
                 if direzione in ["DESTRA", "SINISTRA", "DRITTO"]:
-                    self._direzione_da_prendere = direzione
-                    self._tempo_inizio_svolta   = time.time()
+                    self._direzione_da_prendere    = direzione
+                    self._tempo_inizio_svolta      = time.time()
+                    self._svolta_frase_pronunciata = False   # il timer parte DOPO la frase
                     self.stato = STATO_SVOLTA_AUTOMATICA
                     print(f"[STATO] Transizione a SVOLTA AUTOMATICA. Direzione: {direzione}")
                     if direzione == "SINISTRA":
@@ -670,87 +668,156 @@ class MacchinaStati:
                     break
 
     def _stato_svolta(self):
+        # FASE 1: aspetta che la voce finisca di pronunciare la frase della rotazione.
+        # Il semaforo è "set" quando il motore vocale è libero (nessuna frase in corso).
+        if not self._svolta_frase_pronunciata:
+            if self._voce.semaforo.is_set():
+                # La frase è stata pronunciata per intero: ora avvia il timer reale.
+                self._svolta_frase_pronunciata = True
+                self._tempo_inizio_svolta = time.time()
+            return  # in ogni caso, non fare altro finché la frase non è finita
+
+        # FASE 2: la frase è finita, aspetta la durata della manovra fisica.
         durata = 2.5 if self._direzione_da_prendere in ["DESTRA", "SINISTRA"] else 1.5
         if time.time() - self._tempo_inizio_svolta > durata:
             self._voce.parla("Manovra completata. Riprendo l'assistenza sul percorso lineare.", prioritario=True)
             self._dati["ocr_cartelli"] = {}
             self._mappa_cartelli = {}
             self._analizzatore.diramazione_vista_prima = False
+            self._svolta_frase_pronunciata = False
             self.stato = STATO_NAVIGAZIONE
             print("[STATO] Manovra conclusa. Ritorno a NAVIGAZIONE.")
 
 
 # =============================================================================
 # GestoreMonitoraggio — Gestisce la modalità di descrizione ambientale YOLO
-# attivabile con W/S da tastiera. In questa modalità la macchina a stati è
-# sospesa e ogni 4 secondi viene letto l'ambiente circostante.
 # =============================================================================
 
 class GestoreMonitoraggio:
+    """
+    Macchina a stati interna per il monitoraggio ambientale:
+
+        ATTESA_FRASE_INTRO  → aspetta che la frase di attivazione finisca
+             ↓
+        ACQUISISCI_FRAME    → congela il frame corrente e lo manda a YOLO
+             ↓
+        ATTESA_YOLO         → aspetta che il thread YOLO finisca l'analisi
+             ↓
+        PRONUNCIA           → pronuncia la descrizione (o "nessun oggetto")
+             ↓
+        ATTESA_FINE_FRASE   → aspetta che il telefono finisca di leggere
+             ↓
+        ACQUISISCI_FRAME    → ricomincia con un frame nuovo
+    """
+
+    # Stati interni
+    _ST_ATTESA_FRASE_INTRO = "ATTESA_FRASE_INTRO"
+    _ST_ACQUISISCI_FRAME   = "ACQUISISCI_FRAME"
+    _ST_ATTESA_YOLO        = "ATTESA_YOLO"
+    _ST_PRONUNCIA          = "PRONUNCIA"
+    _ST_ATTESA_FINE_FRASE  = "ATTESA_FINE_FRASE"
 
     def __init__(self, voce: MotoreVocale, rilevatore_yolo: RilevatorYOLO, dati_condivisi):
         self._voce            = voce
         self._yolo            = rilevatore_yolo
         self._dati            = dati_condivisi
         self.attivo           = False
-        self._ultimo_annuncio = 0
+        self._stato           = self._ST_ACQUISISCI_FRAME
+        self.frame_congelato  = None   # pubblico: il loop main lo legge per visualizzarlo
 
-    def aggiorna(self, frame, macchina: MacchinaStati):
+    def aggiorna(self, frame_corrente, macchina: MacchinaStati):
+        """Chiamare ad ogni iterazione del loop principale quando monitoraggio.attivo è True."""
         if not self.attivo:
             return
-        now = time.time()
-        if now - self._ultimo_annuncio > 7.0:
-            descrizione = self._yolo.descrivi_ambiente(frame)
-            if descrizione:
-                # interrompi_subito=True: taglia l'audio in corso sul telefono
-                # e invia la descrizione ambientale immediatamente
-                self._voce.parla(descrizione, interrompi_subito=True)
-            # Pausa breve per dare al thread TTS il tempo di far scattare il semaforo rosso
-            time.sleep(0.1)
-            self._voce.semaforo.wait()
-            self._ultimo_annuncio = time.time()
+
+        # ── ATTESA_FRASE_INTRO ──────────────────────────────────────────────────
+        # Aspetta che la frase di attivazione ("Monitoraggio attivato...") finisca
+        # prima di acquisire il primo frame.
+        if self._stato == self._ST_ATTESA_FRASE_INTRO:
+            if self._voce.semaforo.is_set():
+                self._stato = self._ST_ACQUISISCI_FRAME
+            return
+
+        # ── ACQUISISCI_FRAME ────────────────────────────────────────────────────
+        # Prende il frame LIVE corrente, lo congela e lo manda a YOLO.
+        if self._stato == self._ST_ACQUISISCI_FRAME:
+            self.frame_congelato = frame_corrente.copy()
+            # Svuota i risultati precedenti di YOLO così non leggiamo dati vecchi
+            self._dati["yolo_labels"] = []
+            self._dati["yolo_bbox"]   = []
+            self._dati["yolo_conf"]   = []
+            self._dati["frame_da_analizzare"] = self.frame_congelato.copy()
+            self._stato = self._ST_ATTESA_YOLO
+            print("[MONITORAGGIO] Nuovo frame congelato, avvio analisi YOLO.")
+            return
+
+        # ── ATTESA_YOLO ─────────────────────────────────────────────────────────
+        # Aspetta che il thread YOLO abbia processato il frame congelato.
+        # La condizione è: yolo_occupato è False E yolo_labels è stata aggiornata
+        # (non è più la lista vuota che abbiamo impostato noi sopra).
+        if self._stato == self._ST_ATTESA_YOLO:
+            if not self._dati["yolo_occupato"]:
+                self._stato = self._ST_PRONUNCIA
+            return
+
+        # ── PRONUNCIA ───────────────────────────────────────────────────────────
+        # Legge i risultati YOLO e pronuncia la descrizione.
+        if self._stato == self._ST_PRONUNCIA:
+            descrizione = self._yolo.descrivi_ambiente(self.frame_congelato)
+            if not descrizione:
+                descrizione = "Nessun oggetto rilevato nell'ambiente."
+            self._voce.parla(descrizione, prioritario=True)
+            self._stato = self._ST_ATTESA_FINE_FRASE
+            print(f"[MONITORAGGIO] Pronuncio: {descrizione[:60]}...")
+            return
+
+        # ── ATTESA_FINE_FRASE ───────────────────────────────────────────────────
+        # Aspetta che il telefono finisca di leggere la frase, poi ricomincia
+        # da capo acquisendo un frame nuovo (che sarà già diverso dal precedente).
+        if self._stato == self._ST_ATTESA_FINE_FRASE:
+            if self._voce.semaforo.is_set():
+                self.frame_congelato = None   # libera il frame mostrato a schermo
+                self._stato = self._ST_ACQUISISCI_FRAME
+                print("[MONITORAGGIO] Frase finita. Pronto per il prossimo frame.")
+            return
 
         macchina.stato = STATO_NAVIGAZIONE
-        self._voce.svuota_coda()
 
     def gestisci_tasto(self, tasto, da_voce=False):
-        """
-        Gestisce W/S da tastiera o da comando vocale remoto (da_voce=True).
-        Con da_voce=True usa interrompi_subito per tagliare subito l'audio in corso.
-        """
         if tasto == ord('w') or tasto == ord('W'):
             if not self.attivo:
-                self.attivo = True
-                self._ultimo_annuncio = 0
+                self.attivo          = True
+                self.frame_congelato = None
+                # Prima cosa: aspetta che la frase introduttiva finisca
+                self._stato = self._ST_ATTESA_FRASE_INTRO
                 self._voce.parla(
                     "Monitoraggio ambientale attivato. Metti il telefono parallelo al petto.",
                     interrompi_subito=da_voce,
                     prioritario=not da_voce
                 )
-                self._voce.semaforo.wait()   # aspetta che finisca la frase di attivazione
                 print("[SISTEMA] Monitoraggio Ambientale Continuo: ACCESO")
         elif tasto == ord('s') or tasto == ord('S'):
             if self.attivo:
-                self.attivo = False
+                self.attivo          = False
+                self.frame_congelato = None
+                self._stato          = self._ST_ACQUISISCI_FRAME
                 self._voce.parla(
                     "Monitoraggio ambientale disattivato. Metti il telefono parallelo al pavimento. Torno alla navigazione.",
                     interrompi_subito=da_voce,
                     prioritario=not da_voce
                 )
-                self._voce.semaforo.wait()   # aspetta che finisca la frase di disattivazione
                 print("[SISTEMA] Monitoraggio Ambientale Continuo: SPENTO")
 
 
 # =============================================================================
 # OverlayGrafico — Aggiunge le informazioni di stato al frame visualizzato
-# a schermo (stato corrente, direzione manovra in corso).
 # =============================================================================
 
 class OverlayGrafico:
 
     def applica(self, frame, macchina: MacchinaStati, monitoraggio_attivo: bool):
-        y = 30  # posizione Y della prima riga
-        riga_h = 35  # spazio verticale tra le righe
+        y = 30  
+        riga_h = 35  
 
         if monitoraggio_attivo:
             cv2.putText(frame, "STATO ASSISTENTE: ASCOLTO VOCALE",
@@ -782,8 +849,15 @@ def main():
     print("2/3 Inizializzazione motore OCR (può richiedere qualche secondo)...")
     lettore_ocr = easyocr.Reader(['it', 'en'], gpu=False)
 
-    print("3/3 Accensione Telecamera...")
-    video = cv2.VideoCapture(1)
+    print("3/3 Connessione allo Stream Video della PWA...")
+    FRAME_URL = "http://127.0.0.1:5000/api/leggi-frame"
+
+    frame_attesa = np.zeros((480, 640, 3), dtype=np.uint8)
+    cv2.putText(frame_attesa, "In attesa della videocamera (PWA)...", (40, 240),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+    cv2.putText(frame_attesa, "Apri l'app sul telefono e premi 'Inizia'", (40, 280),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+    maschera_attesa = np.zeros((480, 640), dtype=np.uint8)
 
     dati_condivisi = {
         "frame_da_analizzare": None,
@@ -811,59 +885,89 @@ def main():
 
     voce.parla("Dispositivo di assistenza attivo e in ascolto. Puoi iniziare a camminare.", prioritario=True)
 
-    while video.isOpened():
-        ret, frame = video.read()
-        if not ret:
-            print("[ERRORE] Impossibile acquisire il video dalla telecamera.")
-            break
+    while dati_condivisi["running"]:
 
-        if not dati_condivisi["yolo_occupato"] and not dati_condivisi["ocr_occupato"]:
-            dati_condivisi["frame_da_analizzare"] = frame.copy()
-
-        frame, _ = yolo_r.disegna_su_frame(frame)
-
-        if monitoraggio.attivo:
-            monitoraggio.aggiorna(frame, macchina)
-
-        cartelli_disponibili = dati_condivisi["ocr_cartelli"].copy()
-
-        frame_linee, maschera_linee, incrocio_rilevato, errore_x = analizzatore.elabora(
-            frame.copy(), BLU_LOWER, BLU_UPPER
-        )
-
-        if not monitoraggio.attivo:
-            macchina.aggiorna(errore_x, incrocio_rilevato, cartelli_disponibili, larghezza=frame.shape[1])
-
-        tasto = cv2.waitKey(1) & 0xFF
-
-        # Controlla se è arrivato un comando remoto dal telefono (W/S/Q via voce).
-        # Il comando sovrascrive il tasto fisico e attiva interrompi_subito.
+        # ── 1. LETTURA TASTO E COMANDI VOCALI ──────────────────────────────────
+        tasto   = cv2.waitKey(1) & 0xFF
         da_voce = False
-        cmd = voce.comando_remoto
+        cmd     = voce.comando_remoto
         if cmd:
-            if cmd in ['W', 'W_VOICE']:
-                tasto = ord('w')
-                da_voce = True
-            elif cmd in ['S', 'S_VOICE']:
-                tasto = ord('s')
-                da_voce = True
-            elif cmd in ['Q', 'Q_VOICE']:
-                tasto = ord('q')
-                da_voce = True
+            if   cmd in ['W', 'W_VOICE']: tasto = ord('w'); da_voce = True
+            elif cmd in ['S', 'S_VOICE']: tasto = ord('s'); da_voce = True
+            elif cmd in ['Q', 'Q_VOICE']: tasto = ord('q'); da_voce = True
             if da_voce:
-                voce.svuota_coda()   # svuota i vecchi messaggi di navigazione
+                voce.svuota_coda()
 
         monitoraggio.gestisci_tasto(tasto, da_voce=da_voce)
 
         if tasto == ord('q'):
             break
 
-        frame_finale = overlay.applica(frame_linee, macchina, monitoraggio.attivo)
+        # ── 2. ACQUISIZIONE FRAME DAL TELEFONO ─────────────────────────────────
+        frame_corrente = None
+        try:
+            r = requests.get(FRAME_URL, timeout=0.5)
+            if r.status_code == 200:
+                nparr = np.frombuffer(r.content, np.uint8)
+                frame_corrente = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        except requests.exceptions.RequestException:
+            pass
+
+        # Schermata di attesa se il telefono non ha ancora inviato video
+        if frame_corrente is None:
+            cv2.imshow("Maschera", maschera_attesa)
+            cv2.imshow("Navigation System", frame_attesa)
+            continue
+
+        # ── 3. MODALITÀ MONITORAGGIO AMBIENTALE ────────────────────────────────
+        if monitoraggio.attivo:
+            # Tutta la logica di congelamento/analisi/sblocco è dentro aggiorna().
+            # Passiamo il frame LIVE ad ogni ciclo: aggiorna() decide internamente
+            # se usarlo (per congelare un nuovo frame) o ignorarlo.
+            monitoraggio.aggiorna(frame_corrente, macchina)
+
+            # Per la visualizzazione usiamo il frame congelato se disponibile,
+            # altrimenti il frame live (durante la transizione tra un ciclo e l'altro).
+            frame_da_mostrare = monitoraggio.frame_congelato \
+                if monitoraggio.frame_congelato is not None \
+                else frame_corrente
+
+            frame_display = frame_da_mostrare.copy()
+            frame_display, _ = yolo_r.disegna_su_frame(frame_display)
+            frame_finale  = overlay.applica(frame_display, macchina, True)
+            maschera_vuota = np.zeros(
+                (frame_display.shape[0], frame_display.shape[1]), dtype=np.uint8
+            )
+            cv2.imshow("Maschera", maschera_vuota)
+            cv2.imshow("Navigation System", frame_finale)
+            continue
+
+        # ── 4. MODALITÀ NAVIGAZIONE NORMALE ────────────────────────────────────
+
+        # Resetta il frame congelato quando il monitoraggio è spento
+        monitoraggio._frame_congelato = None
+
+        # Aggiorna il frame da analizzare per i thread YOLO e OCR
+        if not dati_condivisi["yolo_occupato"] and not dati_condivisi["ocr_occupato"]:
+            dati_condivisi["frame_da_analizzare"] = frame_corrente.copy()
+
+        # Disegna i bounding box YOLO sul frame corrente
+        frame_corrente, _ = yolo_r.disegna_su_frame(frame_corrente)
+
+        # Analisi linee blu e stato macchina
+        cartelli_disponibili = dati_condivisi["ocr_cartelli"].copy()
+        frame_linee, maschera_linee, incrocio_rilevato, errore_x = analizzatore.elabora(
+            frame_corrente.copy(), BLU_LOWER, BLU_UPPER
+        )
+        macchina.aggiorna(errore_x, incrocio_rilevato, cartelli_disponibili,
+                          larghezza=frame_corrente.shape[1])
+
+        # Visualizzazione
+        frame_finale = overlay.applica(frame_linee, macchina, False)
         cv2.imshow("Maschera", maschera_linee)
         cv2.imshow("Navigation System", frame_finale)
 
     dati_condivisi["running"] = False
-    video.release()
     cv2.destroyAllWindows()
 
 

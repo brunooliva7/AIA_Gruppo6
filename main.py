@@ -11,7 +11,7 @@ def main():
     percorso_cartella = os.path.dirname(os.path.abspath(__file__))
     
     script_web = os.path.join(percorso_cartella, "PWA.py")
-    script_nav = os.path.join(percorso_cartella, "NavigazioneNoIriun.py")
+    script_nav = os.path.join(percorso_cartella, "NavigazioneAssistita.py")
     
     print("[1/2] Avvio del server web Flask...")
     # Avvia il server Flask
