@@ -1,7 +1,5 @@
 import os
 from flask import Flask, request, jsonify, render_template_string, make_response
-# NOTA: È necessario installare la libreria di Google Cloud per Dialogflow:
-# pip install google-cloud-dialogflow
 from google.cloud import dialogflow
 
 app = Flask(__name__)
@@ -9,22 +7,19 @@ app = Flask(__name__)
 # ==========================================
 # CONFIGURAZIONE CONNESSIONE DIALOGFLOW
 # ==========================================
-# Sostituisci questi valori con i dati del tuo progetto
 PROJECT_ID = "trackbuddy-tpbx"  
 SERVICE_ACCOUNT_FILE = "chiave_dialogFlow.json"
 
-# Imposta la variabile d'ambiente per dire a Google dove trovare le credenziali
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = SERVICE_ACCOUNT_FILE
 
-# ID sessione fittizio (in una vera app potresti generarlo per ogni utente)
+# ID sessione fittizio 
 SESSION_ID = "sessione-vocale-test-123"
 LANGUAGE_CODE = "it-IT"
 
-# Coda globale per i messaggi vocali provenienti da ProvaB
 messaggi_pendenti = []
 taglia_audio_flag = False
 
-# Comando pendente in arrivo dall'interfaccia web verso ProvaB
+# Comando pendente in arrivo dall'interfaccia web
 comando_pendente = None
 
 # Variabile globale per memorizzare l'ultimo fotogramma ricevuto dalla PWA
@@ -32,7 +27,7 @@ ultimo_frame_ricevuto = None
 
 
 # ==========================================
-# INTERFACCIA WEB (HTML + JAVASCRIPT)
+# INTERFACCIA PWA
 # ==========================================
 HTML_PAGE = """
 <!DOCTYPE html>
@@ -54,14 +49,14 @@ HTML_PAGE = """
     
     <style>
         :root {
-            --bg-light: #f8f9fa; /* Grigio chiarissimo per evitare l'abbagliamento */
-            --text-dark: #2d3436; /* Grigio scuro per il testo, alto contrasto */
-            --focus-ring: #0984e3; /* Blu elettrico per il contorno della tastiera */
+            --bg-light: #f8f9fa; 
+            --text-dark: #2d3436; 
+            --focus-ring: #0984e3; 
         }
         
         body { 
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
-            max-width: 40rem; /* Dimensioni in rem per scalabilità */
+            max-width: 40rem;
             margin: 1.5rem auto; 
             text-align: center; 
             background-color: var(--bg-light); 
@@ -195,13 +190,11 @@ HTML_PAGE = """
             window.speechSynthesis.speak(u);
             document.getElementById('initOverlay').style.display = 'none';
             try {
-                // 1. Sblocco permessi hardware
                 let tempStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
                 const dispositivi = await navigator.mediaDevices.enumerateDevices();
                 const fotocamere = dispositivi.filter(device => device.kind === 'videoinput');
                 tempStream.getTracks().forEach(track => track.stop());
 
-                // 2. Selezione fotocamera posteriore
                 let idFotocameraTarget = null;
                 if (fotocamere.length > 2) {
                     idFotocameraTarget = fotocamere[2].deviceId;
@@ -211,7 +204,6 @@ HTML_PAGE = """
                     idFotocameraTarget = fotocamere[0].deviceId;
                 }
 
-                // 3. Avvio del flusso
                 const vincoliFlusso = {
                     audio: true,
                     video: idFotocameraTarget ? { deviceId: { exact: idFotocameraTarget }, width: { ideal: 640 }, height: { ideal: 480 } } : { facingMode: "environment" }
@@ -242,10 +234,8 @@ HTML_PAGE = """
                             resultDiv.innerHTML = `<p style="color: #d63031;"><strong>Errore:</strong> ${data.errore}</p>`;
                             statusDiv.innerText = 'Errore.';
                             
-                            // 1. Nuova frase di errore personalizzata
                             parla("Si è verificato un errore. Riprenderò la navigazione assistita, attendere nuove indicazioni.", true);
                             
-                            // 2. Timeout allungato per la frase più lunga
                             setTimeout(() => {
                                 isRecordingOrWaiting = false; 
                                 statusDiv.innerText = 'Pronto per registrare.'; 
@@ -270,7 +260,6 @@ HTML_PAGE = """
                                 if (pollingInterval) clearInterval(pollingInterval);
                                 window.speechSynthesis.cancel();
                                 
-                                // 2. Svuota i messaggi sul server e spegne Python
                                 fetch('/api/svuota-messaggi', {method: 'POST'}).catch(()=>{});
                                 fetch('/api/imposta-comando', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({comando: 'Q_VOICE'}) }).catch(console.error);
                                 
@@ -283,21 +272,17 @@ HTML_PAGE = """
                     } catch (error) {
                         statusDiv.innerText = 'Errore di connessione.';
                         
-                        // 1. Nuova frase di errore personalizzata
                         parla("Si è verificato un errore di connessione. Riprenderò la navigazione assistita, attendere nuove indicazioni.", true);
                         
-                        // 2. Timeout allungato
                         setTimeout(() => {
                             isRecordingOrWaiting = false;
                             statusDiv.innerText = 'Pronto per registrare.'; 
                             resultDiv.style.display = 'none'; 
-                            // 3. Svuota la coda dei messaggi vecchi!
                             fetch('/api/svuota-messaggi', {method: 'POST'}).catch(()=>{});
                             fetch('/api/imposta-comando', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({comando: 'S_VOICE'}) }).catch(console.error);
                         }, 5500);
                     }
                 };
-                // LOOP STREAMING FOTOGRAMMI VERSO IL PC (10 FPS)
                setInterval(() => {
                     if (videoEl.videoWidth > 0 && videoEl.videoHeight > 0) {
                         canvasEl.width = videoEl.videoWidth;
@@ -319,8 +304,6 @@ HTML_PAGE = """
                 alert('Errore di accesso a microfono/telecamera: ' + err.message);
                 statusDiv.innerText = 'Permessi negati.';
             }
-
-            // Polling Messaggi Vocali
             pollingInterval = setInterval(async () => {
                 if (isRecordingOrWaiting) return;
                 try {
@@ -353,27 +336,20 @@ HTML_PAGE = """
             btnRecord.style.display = 'inline-block';
             btnStop.style.display = 'none';
         };
-
-        // ======= PULSANTE DI SPEGNIMENTO =======
        // ======= PULSANTE DI SPEGNIMENTO =======
         btnQuit.onclick = async () => {
             if (confirm("Vuoi davvero spegnere l'assistente e chiudere tutto?")) {
                 statusDiv.innerText = 'Spegnimento in corso...';
                 
-                // 1. Interrompe immediatamente il timer di ascolto dei messaggi da Python
                 if (pollingInterval) clearInterval(pollingInterval);
                 
-                // 2. Cancella all'istante qualsiasi frase di navigazione rimasta in coda nel browser
                 window.speechSynthesis.cancel();
                 
-                // 3. Pronuncia la frase di spegnimento
                 parla("Spegnimento del sistema in corso. A presto.", true);
                 
                 try {
-                    // 4. Svuota i messaggi residui sul server Flask per sicurezza
                     await fetch('/api/svuota-messaggi', {method: 'POST'}).catch(()=>{});
                     
-                    // 5. Invia l'ordine di chiusura definitivo a Python
                     await fetch('/api/imposta-comando', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
